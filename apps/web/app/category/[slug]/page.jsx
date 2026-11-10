@@ -1,97 +1,85 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// apps/web/app/category/[slug]/page.jsx — one category's products.
+// Loads the category (GET /categories/:slug) for its name and description,
+// then shows the shared listing locked to that category.
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { apiFetch } from "../../../lib/auth";
-import { PageShell, ProductGrid, Pagination, normalizeProduct, COLORS, inputStyle } from "../../../lib/storefront";
-
-const SORTS = [
-  { label: "Newest", sortBy: "createdAt", sortOrder: "desc" },
-  { label: "Best selling", sortBy: "sold", sortOrder: "desc" },
-  { label: "Price: low to high", sortBy: "price", sortOrder: "asc" },
-  { label: "Price: high to low", sortBy: "price", sortOrder: "desc" },
-];
+import ListingHeader from "../../../components/shop/ListingHeader";
+import ProductListing from "../../../components/shop/ProductListing";
 
 export default function CategoryPage() {
   const { slug } = useParams();
   const [category, setCategory] = useState(null);
-  const [notFound, setNotFound] = useState(false);
-  const [sortIdx, setSortIdx] = useState(0);
-  const [page, setPage] = useState(1);
-  const [products, setProducts] = useState([]);
-  const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
-  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState("loading"); // loading | ready | notFound | error
   const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-    setCategory(null); setNotFound(false);
+    setCategory(null);
+    setStatus("loading");
+    setError("");
+
     apiFetch(`/categories/${slug}`)
-      .then(({ ok, status, body }) => {
+      .then(({ ok, status: httpStatus, body }) => {
         if (cancelled) return;
-        if (ok) setCategory(body.data.category);
-        else if (status === 404) setNotFound(true);
-        else setError(body.message || "Couldn't load category.");
+        if (ok) {
+          setCategory(body.data.category);
+          setStatus("ready");
+        } else if (httpStatus === 404) {
+          setStatus("notFound");
+        } else {
+          setError(body?.message || "Couldn't load this category.");
+          setStatus("error");
+        }
       })
-      .catch(() => { if (!cancelled) setError("Couldn't reach the server. Please try again."); });
-    return () => { cancelled = true; };
+      .catch(() => {
+        if (cancelled) return;
+        setError("Couldn't reach the server. Please try again.");
+        setStatus("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [slug]);
 
-  useEffect(() => {
-    if (!category) return;
-    let cancelled = false;
-    setLoading(true);
-    const s = SORTS[sortIdx];
-    const params = new URLSearchParams({ page: String(page), limit: "12", categoryId: category._id, sortBy: s.sortBy, sortOrder: s.sortOrder });
-    apiFetch(`/products?${params.toString()}`)
-      .then(({ ok, body }) => {
-        if (cancelled) return;
-        if (!ok) { setError(body.message || "Couldn't load products."); return; }
-        setProducts((body.data.products || []).map(normalizeProduct));
-        setPagination(body.data.pagination || { page: 1, pages: 1, total: 0 });
-      })
-      .catch(() => { if (!cancelled) setError("Couldn't reach the server. Please try again."); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [category, sortIdx, page]);
+  const crumbs = [
+    { label: "Home", href: "/" },
+    { label: "All Products", href: "/shop" },
+    { label: category?.name || (status === "notFound" ? "Not found" : "…") },
+  ];
 
-  if (notFound) {
+  if (status === "notFound" || status === "error") {
     return (
-      <PageShell>
-        <h1 style={{ fontFamily: "'Georgia', serif", fontSize: 28 }}>Category not found</h1>
-        <p style={{ color: COLORS.textLight }}>This category doesn't exist or is no longer available.</p>
-        <Link href="/shop" style={{ color: COLORS.saffron, fontWeight: 600 }}>Browse all products →</Link>
-      </PageShell>
+      <>
+        <ListingHeader
+          crumbs={crumbs}
+          title={status === "notFound" ? "Category not found" : "Something went wrong"}
+        />
+        <div className="site-container flex flex-col items-start gap-5 py-12">
+          <p className="text-slate" role={status === "error" ? "alert" : undefined}>
+            {status === "notFound" ? "This category doesn't exist or is no longer available." : error}
+          </p>
+          <Link href="/shop" className="btn btn-navy">
+            Browse all products
+          </Link>
+        </div>
+      </>
     );
   }
 
   return (
-    <PageShell>
-      <div style={{ fontSize: 12, color: COLORS.textLight, marginBottom: 10 }}>
-        <Link href="/" style={{ color: COLORS.textLight, textDecoration: "none" }}>Home</Link> /{" "}
-        <Link href="/shop" style={{ color: COLORS.textLight, textDecoration: "none" }}>Shop</Link> / {category?.name || "…"}
-      </div>
-      <h1 style={{ fontFamily: "'Georgia', serif", fontSize: 32, margin: "0 0 6px" }}>{category?.name || "Loading…"}</h1>
-      {category?.description && <p style={{ color: COLORS.textMid, fontSize: 14, maxWidth: 640, margin: "0 0 8px" }}>{category.description}</p>}
-      <p style={{ color: COLORS.textLight, fontSize: 13, margin: "0 0 20px" }}>{pagination.total} product{pagination.total === 1 ? "" : "s"}</p>
-
-      <div style={{ marginBottom: 24 }}>
-        <select value={sortIdx} onChange={(e) => { setSortIdx(Number(e.target.value)); setPage(1); }} style={inputStyle}>
-          {SORTS.map((s, i) => <option key={s.label} value={i}>{s.label}</option>)}
-        </select>
-      </div>
-
-      {error ? (
-        <div style={{ padding: "48px 0", textAlign: "center", color: "#C0392B", fontSize: 14 }}>{error}</div>
-      ) : loading || !category ? (
-        <div style={{ padding: "48px 0", textAlign: "center", color: COLORS.textLight, fontSize: 14 }}>Loading products…</div>
+    <>
+      <ListingHeader crumbs={crumbs} title={category?.name || "Loading…"} description={category?.description} />
+      {category ? (
+        <ProductListing fixedCategoryId={category._id} />
       ) : (
-        <>
-          <ProductGrid products={products} />
-          <Pagination page={pagination.page} pages={pagination.pages} onChange={setPage} />
-        </>
+        <div className="site-container py-16 text-center text-sm text-slate">Loading…</div>
       )}
-    </PageShell>
+    </>
   );
 }

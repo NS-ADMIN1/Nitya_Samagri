@@ -20,7 +20,8 @@ export type CartItem = {
   price: number;
   mrp: number;
   qty: number;
-  icon?: string;
+  icon?: string;   // legacy: set by carts saved before the redesign, no longer read
+  image?: string;  // product photo URL, when the product has one
   category?: string;
   gstPct?: number;
 };

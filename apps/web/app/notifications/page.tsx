@@ -1,185 +1,285 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+// apps/web/app/notifications/page.tsx — live order and payment updates.
+//
+// Updates arrive over the WebSocket in lib/ws.ts while this page is open.
+// The backend keeps no notification history (there is no REST endpoint for
+// it), so the page says so plainly and points to My Orders for anything
+// older. Only events the storefront actually receives are handled.
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { connectNotifications, type WsMessage } from "../../lib/ws";
 import { isLoggedIn } from "../../lib/auth";
+import { formatPrice } from "../../lib/format";
+import { orderStatusLabel } from "../../lib/orders";
+import { connectNotifications } from "../../lib/ws";
+import type { WsMessage } from "../../lib/ws";
+import Icon from "../../components/ui/Icon";
 
-const C = {
-  saffron: "#E8560A", saffronBg: "#FFF3EC",
-  marigold: "#F5A623", marigoldLight: "#FAC65A",
-  cream: "#FFF8EE", creamDark: "#F0E4CE",
-  bark: "#5C3317",
-  text: "#2C1A0E", textMid: "#5C3D20", textLight: "#9A7050",
-  white: "#FFFFFF",
-  green: "#1A7A3C", greenBg: "#EDFAF3",
-  border: "#E8D8BC",
-  gold: "#C8860A", goldBg: "#FFFBE8",
-  blue: "#1A5C9E", blueBg: "#EEF4FF",
-  red: "#C0392B", redBg: "#FFF0EE",
+type Kind = "order" | "payment";
+type Notification = {
+  id: string;
+  kind: Kind;
+  title: string;
+  message: string;
+  orderId: string;
+  time: string; // clock time it arrived, e.g. "3:42 pm"
+  read: boolean;
 };
+type ConnectionStatus = "connecting" | "open" | "error" | "closed";
+type Filter = "all" | Kind;
 
-type Notif = { id: string; type: string; icon: string; title: string; message: string; time: string; read: boolean };
-
-const FILTERS = [
-  { key: "all",     label: "All" },
-  { key: "order",   label: "Orders" },
-  { key: "payment", label: "Payments" },
-  { key: "account", label: "Account" },
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "order", label: "Orders" },
+  { id: "payment", label: "Payments" },
 ];
 
-const typeColor: Record<string, { fg: string; bg: string }> = {
-  order:   { fg: C.blue,    bg: C.blueBg },
-  payment: { fg: C.gold,    bg: C.goldBg },
-  account: { fg: C.saffron, bg: C.saffronBg },
-};
+let sequence = 0;
 
-// Maps the backend's WsEventType (backend/src/websocket/ws.server.ts) to
-// how this page displays it. Real-time only — the backend has no REST
-// endpoint for notification history, so nothing older than "since this
-// page was opened" can be shown yet.
-function toNotif(msg: WsMessage): Notif | null {
-  const p = msg.payload as any;
-  const base = { id: `${msg.event}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, time: "Just now", read: false };
+// Backend WsEventType (backend/src/websocket/ws.server.ts) → what the
+// customer reads. Admin-only events return null and are ignored.
+function toNotification(msg: WsMessage): Notification | null {
+  const payload = msg.payload as { orderId?: unknown; status?: unknown; amount?: unknown; reason?: unknown };
+  const orderId = typeof payload.orderId === "string" ? payload.orderId : "";
+  const orderText = orderId ? `Order ${orderId}` : "Your order";
+
+  let kind: Kind;
+  let title: string;
+  let message: string;
+
   switch (msg.event) {
     case "ORDER_CONFIRMED":
-      return { ...base, type: "order", icon: "✅", title: "Order confirmed", message: `Order ${p.orderId || ""} has been confirmed.` };
+      kind = "order";
+      title = "Order confirmed";
+      message = `${orderText} has been confirmed.`;
+      break;
     case "ORDER_SHIPPED":
-      return { ...base, type: "order", icon: "📦", title: "Order shipped", message: `Order ${p.orderId || ""} is on its way.` };
-    case "ORDER_STATUS_UPDATE":
-      return { ...base, type: "order", icon: "🛵", title: "Order update", message: `Order ${p.orderId || ""} status: ${p.status || "updated"}.` };
+      kind = "order";
+      title = "Order shipped";
+      message = `${orderText} is on its way.`;
+      break;
     case "ORDER_DELIVERED":
-      return { ...base, type: "order", icon: "🏠", title: "Order delivered", message: `Order ${p.orderId || ""} was delivered.` };
+      kind = "order";
+      title = "Order delivered";
+      message = `${orderText} has been delivered.`;
+      break;
+    case "ORDER_STATUS_UPDATE": {
+      const status = typeof payload.status === "string" ? orderStatusLabel(payload.status) : "";
+      kind = "order";
+      title = "Order update";
+      message = status ? `${orderText}: ${status}.` : `${orderText} has been updated.`;
+      break;
+    }
     case "PAYMENT_SUCCESS":
-      return { ...base, type: "payment", icon: "💰", title: "Payment successful", message: `Payment of ₹${p.amount ?? ""} was received.` };
+      kind = "payment";
+      title = "Payment received";
+      message =
+        typeof payload.amount === "number"
+          ? `We received ${formatPrice(payload.amount)} for ${orderText.toLowerCase()}.`
+          : `We received your payment for ${orderText.toLowerCase()}.`;
+      break;
     case "PAYMENT_FAILED":
-      return { ...base, type: "payment", icon: "⚠️", title: "Payment failed", message: p.reason || "Your payment could not be processed." };
-    case "BOOKING_CONFIRMED":
-      return { ...base, type: "order", icon: "🙏", title: "Pandit booking confirmed", message: p.message || "Your pandit booking is confirmed." };
-    case "BOOKING_CANCELLED":
-      return { ...base, type: "order", icon: "❌", title: "Booking cancelled", message: p.message || "Your pandit booking was cancelled." };
+      kind = "payment";
+      title = "Payment not completed";
+      message =
+        typeof payload.reason === "string" && payload.reason
+          ? payload.reason
+          : `The payment for ${orderText.toLowerCase()} did not go through.`;
+      break;
     default:
-      return null; // admin-only events (NEW_ORDER_ALERT, LOW_STOCK_ALERT) are ignored on the storefront
+      return null;
   }
+
+  sequence += 1;
+  return {
+    id: `${msg.event}-${Date.now()}-${sequence}`,
+    kind,
+    title,
+    message,
+    orderId,
+    time: new Date().toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" }),
+    read: false,
+  };
 }
 
+const STATUS_TEXT: Record<ConnectionStatus, string> = {
+  connecting: "Connecting…",
+  open: "Connected. New updates will appear here.",
+  error: "We couldn't connect. Reload the page to try again.",
+  closed: "Disconnected. Reload the page to reconnect.",
+};
+
 export default function NotificationsPage() {
-  const [notifs, setNotifs] = useState<Notif[]>([]);
-  const [filter, setFilter] = useState("all");
-  const [status, setStatus] = useState<"connecting" | "open" | "error" | "closed">("connecting");
-  const loggedIn = useRef(isLoggedIn());
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(null); // null until checked in the browser
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [items, setItems] = useState<Notification[]>([]);
+  const [filter, setFilter] = useState<Filter>("all");
 
   useEffect(() => {
-    if (!loggedIn.current) { setStatus("error"); return; }
-    const disconnect = connectNotifications(
-      (msg) => {
-        const n = toNotif(msg);
-        if (n) setNotifs(prev => [n, ...prev]);
-      },
-      setStatus
-    );
-    return disconnect;
+    const signedIn = isLoggedIn();
+    setLoggedIn(signedIn);
+    if (!signedIn) return undefined;
+
+    return connectNotifications((msg) => {
+      const next = toNotification(msg);
+      if (next) setItems((prev) => [next, ...prev]);
+    }, setStatus);
   }, []);
 
-  const visible = filter === "all" ? notifs : notifs.filter(n => n.type === filter);
-  const unreadCount = notifs.filter(n => !n.read).length;
+  const visible = filter === "all" ? items : items.filter((n) => n.kind === filter);
+  const unread = items.filter((n) => !n.read).length;
 
-  const markAllRead = () => setNotifs(prev => prev.map(n => ({ ...n, read: true })));
-  const toggleRead = (id: string) => setNotifs(prev => prev.map(n => n.id === id ? { ...n, read: !n.read } : n));
-  const clearAll = () => setNotifs([]);
+  const markAllRead = () => setItems((prev) => prev.map((n) => ({ ...n, read: true })));
+  const markRead = (id: string) => setItems((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
 
   return (
-    <div style={{ minHeight: "100vh", background: C.cream, fontFamily: "'Segoe UI','Helvetica Neue',sans-serif" }}>
-      <nav style={{ background: C.white, borderBottom: `1px solid ${C.border}`, padding: "0 24px" }}>
-        <div style={{ maxWidth: 760, margin: "0 auto", height: 60, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
-            <span style={{ fontSize: 20 }}>🪔</span>
-            <span style={{ fontFamily: "'Georgia',serif", fontWeight: 700, fontSize: 16, color: C.saffron }}>nityasamagri</span>
-          </Link>
-          <Link href="/account" style={{ fontSize: 13, color: C.textMid, textDecoration: "none", fontWeight: 600 }}>My Account →</Link>
+    <>
+      <div className="border-b border-line bg-offwhite">
+        <div className="site-container flex flex-col gap-2.5 py-6 md:py-7">
+          <nav aria-label="Breadcrumb">
+            <ol className="flex flex-wrap items-center gap-x-2 text-[13px] text-slate">
+              <li>
+                <Link href="/account" className="inline-flex min-h-[32px] items-center hover:text-navy">
+                  My Account
+                </Link>
+              </li>
+              <li className="flex items-center gap-x-2">
+                <span aria-hidden="true">/</span>
+                <span aria-current="page">Notifications</span>
+              </li>
+            </ol>
+          </nav>
+          <h1 className="heading-display text-[28px] md:text-[40px]">Notifications</h1>
+          <p className="max-w-[640px] text-slate">
+            Order and payment updates show here as they happen, while this page is open. For earlier activity, see{" "}
+            <Link href="/account" className="font-semibold text-navy underline">
+              My Orders
+            </Link>
+            .
+          </p>
         </div>
-      </nav>
+      </div>
 
-      <div style={{ maxWidth: 760, margin: "0 auto", padding: "32px 24px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <h1 style={{ fontFamily: "'Georgia',serif", fontSize: 26, color: C.text, margin: 0 }}>Notifications</h1>
-            <div style={{ fontSize: 13, color: C.textLight, marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ width: 7, height: 7, borderRadius: "50%", display: "inline-block", background: status === "open" ? C.green : status === "connecting" ? C.gold : C.red }} />
-              {status === "open" && (unreadCount > 0 ? `${unreadCount} unread` : "Live — you're all caught up")}
-              {status === "connecting" && "Connecting…"}
-              {status === "error" && !loggedIn.current && "Log in to see live notifications"}
-              {status === "error" && loggedIn.current && "Couldn't connect — retry by reloading"}
-              {status === "closed" && "Disconnected"}
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={markAllRead} disabled={unreadCount === 0} style={{
-              padding: "9px 16px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: C.white,
-              color: unreadCount === 0 ? C.textLight : C.textMid, fontWeight: 600, fontSize: 12,
-              cursor: unreadCount === 0 ? "default" : "pointer",
-            }}>✓ Mark all read</button>
-            <button onClick={clearAll} disabled={notifs.length === 0} style={{
-              padding: "9px 16px", borderRadius: 9, border: `1.5px solid ${C.redBg}`, background: C.redBg,
-              color: C.red, fontWeight: 600, fontSize: 12, cursor: notifs.length === 0 ? "default" : "pointer",
-              opacity: notifs.length === 0 ? 0.5 : 1,
-            }}>Clear all</button>
-          </div>
-        </div>
-
-        <div style={{ background: C.goldBg, color: C.textMid, fontSize: 12, padding: "10px 14px", borderRadius: 10, marginBottom: 20 }}>
-          These are live events only — the backend doesn't have a notification-history endpoint yet, so nothing from before this page was opened can be shown.
-        </div>
-
-        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-          {FILTERS.map(f => {
-            const count = f.key === "all" ? notifs.length : notifs.filter(n => n.type === f.key).length;
-            return (
-              <button key={f.key} onClick={() => setFilter(f.key)} style={{
-                padding: "8px 16px", borderRadius: 999, border: `1.5px solid ${filter === f.key ? C.saffron : C.border}`,
-                background: filter === f.key ? C.saffronBg : C.white, color: filter === f.key ? C.saffron : C.textMid,
-                fontWeight: 600, fontSize: 12, cursor: "pointer",
-              }}>{f.label} {count > 0 && <span style={{ opacity: 0.7 }}>({count})</span>}</button>
-            );
-          })}
-        </div>
-
-        {visible.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "60px 0", color: C.textLight }}>
-            <div style={{ fontSize: 40, marginBottom: 10 }}>🔔</div>
-            <div style={{ fontSize: 14 }}>
-              {status === "open" ? "No notifications yet — you'll see updates here as they happen." : "Not connected."}
-            </div>
+      <div className="site-container flex max-w-[860px] flex-col gap-5 pb-14 pt-6 md:pb-[72px] md:pt-9">
+        {loggedIn === null ? (
+          <p className="text-sm text-slate">Loading…</p>
+        ) : loggedIn === false ? (
+          <div className="flex flex-col items-start gap-4">
+            <p className="text-slate">Please log in to see updates about your orders.</p>
+            <Link href="/login?next=/notifications" className="btn btn-gold">
+              Log in
+            </Link>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {visible.map(n => {
-              const tc = typeColor[n.type] || typeColor.account;
-              return (
-                <div key={n.id} onClick={() => toggleRead(n.id)} style={{
-                  background: n.read ? C.white : C.saffronBg,
-                  border: `1px solid ${n.read ? C.border : C.saffron + "44"}`,
-                  borderRadius: 14, padding: "16px 18px", display: "flex", gap: 14, cursor: "pointer",
-                }}>
-                  <div style={{ width: 40, height: 40, borderRadius: "50%", background: tc.bg, color: tc.fg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>
-                    {n.icon}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
-                      <div style={{ fontWeight: n.read ? 600 : 700, fontSize: 14, color: C.text }}>{n.title}</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                        <span style={{ fontSize: 11, color: C.textLight, whiteSpace: "nowrap" }}>{n.time}</span>
-                        {!n.read && <span style={{ width: 8, height: 8, borderRadius: "50%", background: C.saffron, display: "inline-block" }} />}
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p role="status" className="flex items-center gap-2 text-sm text-slate">
+                <span
+                  aria-hidden="true"
+                  className={`h-2 w-2 rounded-full ${
+                    status === "open" ? "bg-success" : status === "connecting" ? "bg-gold" : "bg-danger"
+                  }`}
+                />
+                {STATUS_TEXT[status]}
+                {unread > 0 && <span className="font-semibold text-navy">{unread} unread.</span>}
+              </p>
+              {items.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={markAllRead} disabled={unread === 0} className="btn btn-outline min-h-[40px] px-3">
+                    Mark all read
+                  </button>
+                  <button type="button" onClick={() => setItems([])} className="btn btn-outline min-h-[40px] px-3">
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {items.length > 0 && (
+              <div role="group" aria-label="Filter notifications" className="flex flex-wrap gap-2">
+                {FILTERS.map((f) => {
+                  const count = f.id === "all" ? items.length : items.filter((n) => n.kind === f.id).length;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      aria-pressed={filter === f.id}
+                      onClick={() => setFilter(f.id)}
+                      className={`inline-flex min-h-[40px] items-center rounded-full border px-4 text-[13px] font-medium ${
+                        filter === f.id ? "border-navy bg-navy text-white" : "border-field bg-white text-navy hover:border-navy"
+                      }`}
+                    >
+                      {f.label} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {visible.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 rounded-md border border-line bg-offwhite px-6 py-12 text-center">
+                <span className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-mist text-slate">
+                  <Icon name="bell" size={26} />
+                </span>
+                <p className="font-serif text-xl font-semibold">
+                  {items.length === 0 ? "No new updates" : "Nothing in this group"}
+                </p>
+                {items.length === 0 && (
+                  <p className="max-w-[420px] text-sm text-slate">
+                    When an order is confirmed, shipped or delivered, or a payment goes through, it will appear here.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-3" aria-live="polite">
+                {visible.map((n) => (
+                  <li
+                    key={n.id}
+                    className={`flex items-start gap-3.5 rounded-md border p-4 md:p-5 ${
+                      n.read ? "border-line bg-white" : "border-gold bg-offwhite"
+                    }`}
+                  >
+                    <span className="mt-0.5 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-navy text-gold">
+                      <Icon name={n.kind === "payment" ? "card" : "box"} size={20} />
+                    </span>
+                    <div className="flex min-w-0 flex-1 flex-col gap-1">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                        <p className="text-[15px] font-semibold">
+                          {n.title}
+                          {!n.read && <span className="sr-only"> (unread)</span>}
+                        </p>
+                        <span className="text-[13px] text-slate">{n.time}</span>
+                      </div>
+                      <p className="text-sm text-slate">{n.message}</p>
+                      <div className="flex flex-wrap gap-x-5 gap-y-1 pt-1 text-[13px] font-semibold">
+                        {n.orderId && (
+                          <Link
+                            href={`/delivery?orderId=${encodeURIComponent(n.orderId)}`}
+                            onClick={() => markRead(n.id)}
+                            className="inline-flex min-h-[36px] items-center underline"
+                          >
+                            View order
+                          </Link>
+                        )}
+                        {!n.read && (
+                          <button
+                            type="button"
+                            onClick={() => markRead(n.id)}
+                            className="min-h-[36px] text-slate underline hover:text-navy"
+                          >
+                            Mark as read
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <div style={{ fontSize: 13, color: C.textMid, marginTop: 3, lineHeight: 1.5 }}>{n.message}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
-    </div>
+    </>
   );
 }

@@ -1,182 +1,234 @@
 "use client";
 
-import type { CSSProperties, ReactNode, KeyboardEvent, FormEvent } from "react";
-import { useState, useEffect, useRef } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+// apps/web/app/login/page.tsx — log in or create an account.
+//
+// Three real paths, all unchanged on the backend
+// (backend/src/modules/auth/auth.routes.ts):
+//   • Password login   POST /auth/login          { phone, password }
+//   • OTP login        Firebase sends and checks the SMS code in the browser,
+//                      then POST /auth/otp/verify { idToken }. This also
+//                      creates the account for a number seen for the first time.
+//   • Sign up          POST /auth/register, then logs straight in.
+//
+// After login the customer returns to where they came from:
+//   /login?next=/cart  →  back to the cart.
+
+import { Suspense, useEffect, useRef, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { ConfirmationResult } from "firebase/auth";
+import { apiFetch, isLoggedIn, saveSession, toE164Phone } from "../../lib/auth";
+import type { SessionUser } from "../../lib/auth";
 import { sendFirebaseOtp } from "../../lib/firebase";
-import { apiFetch, saveSession, toE164Phone } from "../../lib/auth";
+import { BRAND } from "../../lib/theme";
+import OtpInput from "../../components/ui/OtpInput";
 
-const C = {
-  saffron: "#E8560A", saffronDark: "#B8400A", saffronBg: "#FFF3EC",
-  marigold: "#F5A623", marigoldLight: "#FAC65A",
-  cream: "#FFF8EE", creamDark: "#F0E4CE",
-  bark: "#5C3317", barkLight: "#7A4A28",
-  text: "#2C1A0E", textMid: "#5C3D20", textLight: "#9A7050",
-  white: "#FFFFFF",
-  green: "#1A7A3C", greenBg: "#EDFAF3",
-  border: "#E8D8BC",
-  gold: "#C8860A", goldBg: "#FFFBE8",
-  blue: "#1A5C9E", blueBg: "#EEF4FF",
-  red: "#C0392B", redBg: "#FFF0EE",
-};
-
-const inputStyle: CSSProperties = {
-  width: "100%", padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${C.border}`,
-  fontSize: 14, color: C.text, background: C.cream, outline: "none", boxSizing: "border-box",
-};
-
-const primaryBtn = {
-  width: "100%", padding: "13px", borderRadius: 11, background: C.saffron, color: C.white,
-  border: "none", fontWeight: 700, fontSize: 14, cursor: "pointer",
-};
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textMid, marginBottom: 6 }}>{label}</label>
-      {children}
-    </div>
-  );
-}
-
-function OtpBoxes({ value, onChange }: { value: string; onChange: (val: string) => void }) {
-  const refs = useRef<(HTMLInputElement | null)[]>([]);
-  const update = (i: number, val: string) => {
-    if (!/^\d?$/.test(val)) return;
-    const next = value.split("");
-    next[i] = val;
-    onChange(next.join("").slice(0, 6));
-    if (val && refs.current[i + 1]) refs.current[i + 1]?.focus();
-  };
-  const onKeyDown = (i: number, e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Backspace" && !value[i] && refs.current[i - 1]) refs.current[i - 1]?.focus();
-  };
-  return (
-    <div style={{ display: "flex", gap: 8 }}>
-      {[0, 1, 2, 3, 4, 5].map(i => (
-        <input
-          key={i}
-          ref={el => { refs.current[i] = el; }}
-          value={value[i] || ""}
-          onChange={e => update(i, e.target.value)}
-          onKeyDown={e => onKeyDown(i, e)}
-          maxLength={1}
-          inputMode="numeric"
-          style={{ width: 42, height: 48, textAlign: "center", fontSize: 18, fontWeight: 700, borderRadius: 10, border: `1.5px solid ${C.border}`, color: C.text, background: C.cream, outline: "none" }}
-        />
-      ))}
-    </div>
-  );
-}
+type Mode = "login" | "signup";
+type Method = "password" | "otp";
+type AuthData = { data: { user: SessionUser; accessToken: string; refreshToken: string } };
 
 const RECAPTCHA_CONTAINER_ID = "ns-login-recaptcha";
+const RESEND_WAIT_SECONDS = 30;
+const MIN_PASSWORD_LENGTH = 8; // RegisterSchema on the backend
 
-export default function LoginPage() {
+// Only ever redirect to a page on this site.
+function safeNext(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/login")) return "/";
+  return raw;
+}
+
+function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-[13px] font-semibold">
+        {label}
+      </label>
+      {children}
+      {hint && <p className="text-[13px] text-slate">{hint}</p>}
+    </div>
+  );
+}
+
+function SegmentButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`min-h-[44px] flex-1 rounded text-sm font-semibold ${
+        active ? "bg-navy text-white" : "text-navy hover:bg-mist"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function LoginForm() {
   const router = useRouter();
-  const [mode, setMode] = useState("login");       // "login" | "signup"
-  const [method, setMethod] = useState("password"); // "password" | "otp"  (login mode only)
+  const searchParams = useSearchParams();
+  const next = safeNext(searchParams.get("next"));
+
+  const [mode, setMode] = useState<Mode>("login");
+  const [method, setMethod] = useState<Method>("password");
+  const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [resendIn, setResendIn] = useState(0);
-  const [agree, setAgree] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [done, setDone] = useState(false);
+  const [notice, setNotice] = useState("");
 
-  // Holds the Firebase confirmation handle between "Send OTP" and
-  // "Verify & Log In" — its .confirm(code) call is what actually validates
-  // the code and hands us back a Firebase ID token.
+  // Firebase's handle between "Send OTP" and "Verify" — its .confirm(code)
+  // checks the code and returns the ID token the backend verifies.
   const confirmationRef = useRef<ConfirmationResult | null>(null);
 
+  // Already signed in: nothing to do here.
   useEffect(() => {
-    if (resendIn <= 0) return;
-    const t = setInterval(() => setResendIn(s => s - 1), 1000);
-    return () => clearInterval(t);
+    if (isLoggedIn()) router.replace(next === "/" ? "/account" : next);
+  }, [router, next]);
+
+  useEffect(() => {
+    if (resendIn <= 0) return undefined;
+    const timer = setInterval(() => setResendIn((s) => s - 1), 1000);
+    return () => clearInterval(timer);
   }, [resendIn]);
+
+  const resetOtp = () => {
+    setOtp("");
+    setOtpSent(false);
+    setResendIn(0);
+    confirmationRef.current = null;
+  };
+
+  const switchMode = (nextMode: Mode) => {
+    setMode(nextMode);
+    setError("");
+    setNotice("");
+    resetOtp();
+  };
+
+  const switchMethod = (nextMethod: Method) => {
+    setMethod(nextMethod);
+    setError("");
+    setNotice("");
+    resetOtp();
+  };
+
+  const finish = (data: AuthData["data"]) => {
+    saveSession({ accessToken: data.accessToken, refreshToken: data.refreshToken }, data.user);
+    router.replace(next);
+  };
 
   const sendOtp = async () => {
     const e164 = toE164Phone(phone);
-    if (!e164) { setError("Enter a valid 10-digit phone number."); return; }
+    if (!e164) {
+      setError("Enter a valid 10-digit mobile number.");
+      return;
+    }
     setError("");
     setLoading(true);
     try {
       confirmationRef.current = await sendFirebaseOtp(e164, RECAPTCHA_CONTAINER_ID);
+      setOtp("");
       setOtpSent(true);
-      setResendIn(30);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't send OTP. Please try again.");
+      setResendIn(RESEND_WAIT_SECONDS);
+    } catch {
+      setError("We couldn't send the OTP. Please check the number and try again.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loginWithPassword = async (e164: string) => {
+    const { ok, body } = await apiFetch<AuthData>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ phone: e164, password }),
+    });
+    if (!ok) throw new Error(body.message || "Incorrect mobile number or password.");
+    finish(body.data);
+  };
+
+  const loginWithOtp = async () => {
+    if (!confirmationRef.current) throw new Error("Please request a new OTP.");
+    let idToken: string;
+    try {
+      const credential = await confirmationRef.current.confirm(otp);
+      idToken = await credential.user.getIdToken();
+    } catch {
+      throw new Error("That OTP is incorrect or has expired. Please try again.");
+    }
+    const { ok, body } = await apiFetch<AuthData>("/auth/otp/verify", {
+      method: "POST",
+      body: JSON.stringify({ idToken }),
+    });
+    if (!ok) throw new Error(body.message || "We couldn't verify the OTP. Please try again.");
+    finish(body.data);
+  };
+
+  const signUp = async (e164: string) => {
+    const { ok, body } = await apiFetch<{ message?: string }>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ name: name.trim(), phone: e164, email: email.trim() || undefined, password }),
+    });
+    if (!ok) throw new Error(body.message || "We couldn't create your account. Please try again.");
+
+    // /auth/register creates the account but returns no session, so log in
+    // with the password that was just set.
+    try {
+      await loginWithPassword(e164);
+    } catch {
+      setMode("login");
+      setMethod("password");
+      setPassword("");
+      setConfirmPassword("");
+      setNotice("Your account is ready. Please log in.");
     }
   };
 
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError("");
-
-    if (mode === "login" && method === "password" && (!phone || !password)) {
-      setError("Enter your phone number and password."); return;
-    }
-    if (mode === "login" && method === "otp" && (!otpSent || otp.length !== 6)) {
-      setError("Enter the 6-digit OTP sent to your phone."); return;
-    }
-    if (mode === "signup") {
-      if (!name || phone.trim().length < 10 || !password) { setError("Fill in your name, phone number and a password."); return; }
-      if (password !== confirmPassword) { setError("Passwords don't match."); return; }
-      if (!agree) { setError("Please accept the Terms & Privacy Policy to continue."); return; }
-    }
+    setNotice("");
 
     const e164 = toE164Phone(phone);
-    if (!e164) { setError("Enter a valid 10-digit phone number."); return; }
+    if (!e164) {
+      setError("Enter a valid 10-digit mobile number.");
+      return;
+    }
+
+    if (mode === "signup") {
+      if (name.trim().length < 2) {
+        setError("Enter your full name.");
+        return;
+      }
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        setError(`Choose a password with at least ${MIN_PASSWORD_LENGTH} characters.`);
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError("The two passwords don't match.");
+        return;
+      }
+    } else if (method === "password") {
+      if (!password) {
+        setError("Enter your password.");
+        return;
+      }
+    } else if (!otpSent || otp.length !== 6) {
+      setError("Enter the 6-digit OTP sent to your phone.");
+      return;
+    }
 
     setLoading(true);
     try {
-      if (mode === "login" && method === "password") {
-        const { ok, body } = await apiFetch<{ data: { user: any; accessToken: string; refreshToken: string } }>(
-          "/auth/login",
-          { method: "POST", body: JSON.stringify({ phone: e164, password }) }
-        );
-        if (!ok) throw new Error(body.message || "Invalid phone number or password.");
-        saveSession({ accessToken: body.data.accessToken, refreshToken: body.data.refreshToken }, body.data.user);
-      } else if (mode === "login" && method === "otp") {
-        if (!confirmationRef.current) throw new Error("Please request a new OTP.");
-        const credential = await confirmationRef.current.confirm(otp);
-        const idToken = await credential.user.getIdToken();
-        const { ok, body } = await apiFetch<{ data: { user: any; accessToken: string; refreshToken: string } }>(
-          "/auth/otp/verify",
-          { method: "POST", body: JSON.stringify({ idToken }) }
-        );
-        if (!ok) throw new Error(body.message || "OTP verification failed.");
-        saveSession({ accessToken: body.data.accessToken, refreshToken: body.data.refreshToken }, body.data.user);
-      } else {
-        // Signup — /auth/register only creates the account (no tokens are
-        // issued back), so after this we drop the user into the login tab
-        // to sign in with the password they just set.
-        const { ok, body } = await apiFetch<{ message?: string }>(
-          "/auth/register",
-          { method: "POST", body: JSON.stringify({ name, phone: e164, email: email || undefined, password }) }
-        );
-        if (!ok) throw new Error(body.message || "Registration failed.");
-        setDone(true);
-        setTimeout(() => {
-          setDone(false);
-          setMode("login");
-          setMethod("password");
-          setPassword("");
-        }, 1400);
-        setLoading(false);
-        return;
-      }
-
-      setDone(true);
-      setTimeout(() => router.push("/"), 900);
+      if (mode === "signup") await signUp(e164);
+      else if (method === "password") await loginWithPassword(e164);
+      else await loginWithOtp();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
     } finally {
@@ -184,189 +236,215 @@ export default function LoginPage() {
     }
   };
 
+  const usingOtp = mode === "login" && method === "otp";
+  const submitLabel = loading
+    ? "Please wait…"
+    : mode === "signup"
+      ? "Create account"
+      : usingOtp
+        ? "Verify and log in"
+        : "Log in";
+
   return (
-    <div style={{ minHeight: "100vh", background: C.cream, fontFamily: "'Segoe UI','Helvetica Neue',sans-serif", display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+    <div className="bg-offwhite">
       {/* Invisible reCAPTCHA anchor required by Firebase phone auth */}
       <div id={RECAPTCHA_CONTAINER_ID} />
 
-      {/* Left — brand panel */}
-      <div style={{
-        background: `linear-gradient(160deg, ${C.bark} 0%, #3A200E 100%)`, color: C.white,
-        display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "48px 56px",
-      }}>
-        <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none", color: C.white }}>
-          <span style={{ fontSize: 26 }}>🪔</span>
-          <span style={{ fontFamily: "'Georgia',serif", fontWeight: 700, fontSize: 18, color: C.marigoldLight }}>nityasamagri</span>
-        </Link>
-
-        <div>
-          <h1 style={{ fontFamily: "'Georgia',serif", fontSize: 34, lineHeight: 1.25, margin: "0 0 16px" }}>
-            Welcome back to your<br />spiritual journey
-          </h1>
-          <p style={{ fontSize: 14, color: "rgba(255,255,255,0.65)", lineHeight: 1.7, maxWidth: 380, marginBottom: 32 }}>
-            Sign in to track orders, save addresses, and get faster checkout on every visit.
-          </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {[
-              ["📦", "Track every order in real time"],
-              ["⚡", "One-tap checkout with saved addresses"],
-              ["🎁", "Early access to festival offers"],
-            ].map(([icon, text]) => (
-              <div key={text} style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                <span style={{ fontSize: 20 }}>{icon}</span>
-                <span style={{ fontSize: 13, color: "rgba(255,255,255,0.85)" }}>{text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>© 2026 nityasamagri. All rights reserved.</div>
-      </div>
-
-      {/* Right — form */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "40px" }}>
-        <div style={{ width: "100%", maxWidth: 380 }}>
-          {done ? (
-            <div style={{ textAlign: "center", padding: "40px 0" }}>
-              <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
-              <div style={{ fontFamily: "'Georgia',serif", fontSize: 20, color: C.text, marginBottom: 6 }}>
-                {mode === "signup" ? "Account created!" : "Signed in!"}
-              </div>
-              <div style={{ fontSize: 13, color: C.textLight }}>
-                {mode === "signup" ? "Taking you to log in…" : "Taking you to your account…"}
-              </div>
+      <div className="site-container flex justify-center py-8 md:py-14">
+        <div className="flex w-full max-w-[920px] flex-col overflow-hidden rounded-md border border-line bg-white md:flex-row">
+          <div className="hidden flex-col justify-between gap-10 bg-navy p-10 text-white md:flex md:w-[42%]">
+            <div className="flex flex-col gap-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-gold">{BRAND.wordmark}</p>
+              <h2 className="font-serif text-[32px] font-semibold leading-tight">Make Every Morning Sacred</h2>
+              <p className="text-[15px] leading-relaxed text-slate-light">{BRAND.tagline}.</p>
             </div>
-          ) : (
-            <>
-              {/* Tabs */}
-              <div style={{ display: "flex", background: C.creamDark, borderRadius: 12, padding: 4, marginBottom: 28 }}>
-                {[["login", "Log In"], ["signup", "Sign Up"]].map(([k, l]) => (
-                  <button key={k} onClick={() => { setMode(k); setError(""); }} style={{
-                    flex: 1, padding: "10px", borderRadius: 9, border: "none", cursor: "pointer",
-                    fontWeight: 700, fontSize: 13,
-                    background: mode === k ? C.white : "transparent",
-                    color: mode === k ? C.saffron : C.textMid,
-                    boxShadow: mode === k ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
-                  }}>{l}</button>
+            <ul className="flex flex-col gap-3 border-t border-navy-line pt-6 text-sm text-slate-light">
+              <li>Track your orders from your account</li>
+              <li>Save delivery addresses for faster checkout</li>
+              <li>Review the products you have received</li>
+            </ul>
+          </div>
+
+          <div className="flex flex-1 flex-col gap-5 p-5 md:p-10">
+            <div role="group" aria-label="Log in or sign up" className="flex gap-1 rounded border border-line p-1">
+              <SegmentButton active={mode === "login"} onClick={() => switchMode("login")}>
+                Log in
+              </SegmentButton>
+              <SegmentButton active={mode === "signup"} onClick={() => switchMode("signup")}>
+                Sign up
+              </SegmentButton>
+            </div>
+
+            <h1 className="heading-display text-[26px] md:text-[30px]">
+              {mode === "login" ? "Log in to your account" : "Create your account"}
+            </h1>
+
+            {mode === "login" && (
+              <div role="group" aria-label="How to log in" className="flex gap-2">
+                {(["password", "otp"] as Method[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    aria-pressed={method === m}
+                    onClick={() => switchMethod(m)}
+                    className={`inline-flex min-h-[40px] items-center rounded-full border px-4 text-[13px] font-medium ${
+                      method === m ? "border-navy bg-navy text-white" : "border-field bg-white text-navy hover:border-navy"
+                    }`}
+                  >
+                    {m === "password" ? "With password" : "With mobile OTP"}
+                  </button>
                 ))}
               </div>
+            )}
 
-              <h2 style={{ fontFamily: "'Georgia',serif", fontSize: 24, color: C.text, margin: "0 0 4px" }}>
-                {mode === "login" ? "Log in to your account" : "Create your account"}
-              </h2>
-              <p style={{ fontSize: 13, color: C.textLight, margin: "0 0 24px" }}>
-                {mode === "login" ? "Enter your details to continue." : "It only takes a minute."}
-              </p>
-
-              {/* Login method toggle */}
-              {mode === "login" && (
-                <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-                  {[["password", "Password"], ["otp", "OTP"]].map(([k, l]) => (
-                    <button key={k} onClick={() => { setMethod(k); setError(""); setOtpSent(false); setOtp(""); confirmationRef.current = null; }} style={{
-                      padding: "6px 16px", borderRadius: 999, border: `1.5px solid ${method === k ? C.saffron : C.border}`,
-                      background: method === k ? C.saffronBg : "transparent", color: method === k ? C.saffron : C.textMid,
-                      fontWeight: 600, fontSize: 12, cursor: "pointer",
-                    }}>{l}</button>
-                  ))}
-                </div>
+            <form onSubmit={submit} noValidate className="flex flex-col gap-4">
+              {mode === "signup" && (
+                <Field id="login-name" label="Full name">
+                  <input
+                    id="login-name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    autoComplete="name"
+                    className="input"
+                  />
+                </Field>
               )}
 
-              <form onSubmit={submit}>
-                {mode === "signup" && (
-                  <Field label="Full Name">
-                    <input value={name} onChange={e => setName(e.target.value)} placeholder="Rahul Sharma" style={inputStyle} />
-                  </Field>
-                )}
+              <Field id="login-phone" label="Mobile number">
+                <div className="flex gap-2">
+                  <span className="input flex w-14 shrink-0 items-center justify-center px-0 text-slate" aria-hidden="true">
+                    +91
+                  </span>
+                  <input
+                    id="login-phone"
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    value={phone}
+                    onChange={(e) => {
+                      setPhone(e.target.value.replace(/\D/g, "").slice(0, 10));
+                      if (otpSent) resetOtp();
+                    }}
+                    placeholder="10-digit number"
+                    className="input min-w-0"
+                  />
+                </div>
+              </Field>
 
-                <Field label="Phone Number">
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <span style={{ ...inputStyle, width: 56, textAlign: "center", flexShrink: 0 }}>+91</span>
-                    <input value={phone} onChange={e => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="98765 43210" style={inputStyle} />
-                  </div>
+              {mode === "signup" && (
+                <Field id="login-email" label="Email (optional)">
+                  <input
+                    id="login-email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    autoComplete="email"
+                    className="input"
+                  />
                 </Field>
+              )}
 
-                {mode === "signup" && (
-                  <Field label="Email (optional)">
-                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" style={inputStyle} />
-                  </Field>
-                )}
-
-                {(mode === "signup" || method === "password") && (
-                  <Field label="Password">
-                    <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" style={inputStyle} />
-                  </Field>
-                )}
-
-                {mode === "signup" && (
-                  <Field label="Confirm Password">
-                    <input type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} placeholder="••••••••" style={inputStyle} />
-                  </Field>
-                )}
-
-                {mode === "login" && method === "otp" && (
-                  <Field label={otpSent ? "Enter OTP" : ""}>
-                    {!otpSent ? (
-                      <button type="button" onClick={sendOtp} disabled={loading} style={{ ...primaryBtn, background: C.white, color: C.saffron, border: `1.5px solid ${C.saffron}`, opacity: loading ? 0.7 : 1 }}>
-                        {loading ? "Sending…" : "Send OTP"}
-                      </button>
-                    ) : (
-                      <>
-                        <OtpBoxes value={otp} onChange={setOtp} />
-                        <div style={{ marginTop: 10, fontSize: 12, color: C.textLight }}>
-                          {resendIn > 0 ? `Resend OTP in ${resendIn}s` : (
-                            <span onClick={sendOtp} style={{ color: C.saffron, fontWeight: 600, cursor: "pointer" }}>Resend OTP</span>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </Field>
-                )}
-
-                {mode === "login" && method === "password" && (
-                  <div style={{ textAlign: "right", marginTop: -8, marginBottom: 20 }}>
-                    <span style={{ fontSize: 12, color: C.saffron, fontWeight: 600, cursor: "pointer" }}>Forgot password?</span>
-                  </div>
-                )}
-
-                {mode === "signup" && (
-                  <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 20, cursor: "pointer" }}>
-                    <input type="checkbox" checked={agree} onChange={e => setAgree(e.target.checked)} style={{ marginTop: 2, accentColor: C.saffron }} />
-                    <span style={{ fontSize: 12, color: C.textMid, lineHeight: 1.5 }}>
-                      I agree to the Terms of Service and Privacy Policy
-                    </span>
-                  </label>
-                )}
-
-                {error && (
-                  <div style={{ background: C.redBg, color: C.red, fontSize: 12, fontWeight: 600, padding: "9px 12px", borderRadius: 8, marginBottom: 16 }}>
-                    {error}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={loading || (mode === "login" && method === "otp" && !otpSent)}
-                  style={{ ...primaryBtn, opacity: loading || (mode === "login" && method === "otp" && !otpSent) ? 0.7 : 1, cursor: loading ? "default" : "pointer" }}
+              {!usingOtp && (
+                <Field
+                  id="login-password"
+                  label="Password"
+                  hint={mode === "signup" ? `At least ${MIN_PASSWORD_LENGTH} characters.` : undefined}
                 >
-                  {loading ? "Please wait…" : mode === "login" ? (method === "otp" ? "Verify & Log In" : "Log In") : "Create Account"}
-                </button>
-              </form>
+                  <input
+                    id="login-password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                    className="input"
+                  />
+                </Field>
+              )}
 
-              <div style={{ textAlign: "center", marginTop: 20, fontSize: 13, color: C.textLight }}>
-                {mode === "login" ? (
-                  <>New here? <span onClick={() => { setMode("signup"); setError(""); }} style={{ color: C.saffron, fontWeight: 700, cursor: "pointer" }}>Create an account</span></>
+              {mode === "signup" && (
+                <Field id="login-confirm" label="Confirm password">
+                  <input
+                    id="login-confirm"
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    autoComplete="new-password"
+                    className="input"
+                  />
+                </Field>
+              )}
+
+              {mode === "login" && method === "password" && (
+                <p className="text-[13px] text-slate">
+                  Forgot your password?{" "}
+                  <button type="button" onClick={() => switchMethod("otp")} className="font-semibold text-navy underline">
+                    Log in with a mobile OTP instead
+                  </button>
+                </p>
+              )}
+
+              {usingOtp &&
+                (otpSent ? (
+                  <div className="flex flex-col gap-2">
+                    <p className="text-[13px] font-semibold">Enter the OTP sent to +91 {phone}</p>
+                    <OtpInput value={otp} onChange={setOtp} disabled={loading} />
+                    <p className="text-[13px] text-slate" aria-live="polite">
+                      {resendIn > 0 ? (
+                        `You can ask for a new OTP in ${resendIn}s.`
+                      ) : (
+                        <button type="button" onClick={sendOtp} disabled={loading} className="font-semibold text-navy underline">
+                          Send a new OTP
+                        </button>
+                      )}
+                    </p>
+                  </div>
                 ) : (
-                  <>Already have an account? <span onClick={() => { setMode("login"); setError(""); }} style={{ color: C.saffron, fontWeight: 700, cursor: "pointer" }}>Log in</span></>
-                )}
-              </div>
+                  <button type="button" onClick={sendOtp} disabled={loading} className="btn btn-outline">
+                    {loading ? "Sending…" : "Send OTP"}
+                  </button>
+                ))}
 
-              <div style={{ textAlign: "center", marginTop: 16 }}>
-                <Link href="/" style={{ fontSize: 12, color: C.textLight, textDecoration: "none" }}>← Back to Shop</Link>
-              </div>
-            </>
-          )}
+              {notice && (
+                <p role="status" className="text-sm font-semibold text-success">
+                  {notice}
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="rounded border border-danger p-3 text-sm font-semibold text-danger">
+                  {error}
+                </p>
+              )}
+
+              {(!usingOtp || otpSent) && (
+                <button type="submit" disabled={loading} className="btn btn-gold min-h-[52px]">
+                  {submitLabel}
+                </button>
+              )}
+            </form>
+
+            <p className="text-center text-sm text-slate">
+              {mode === "login" ? "New here? " : "Already have an account? "}
+              <button
+                type="button"
+                onClick={() => switchMode(mode === "login" ? "signup" : "login")}
+                className="font-semibold text-navy underline"
+              >
+                {mode === "login" ? "Create an account" : "Log in"}
+              </button>
+            </p>
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  // useSearchParams needs a Suspense boundary so the page can still be
+  // statically generated at build time.
+  return (
+    <Suspense fallback={<div className="site-container py-16 text-center text-sm text-slate">Loading…</div>}>
+      <LoginForm />
+    </Suspense>
   );
 }

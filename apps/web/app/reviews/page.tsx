@@ -1,220 +1,344 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// apps/web/app/reviews/page.tsx — the customer's own reviews.
+//
+//   To review    GET /reviews/pending   delivered products not yet reviewed
+//   Your reviews GET /reviews/mine
+//   Write        POST /reviews          { productId, rating, comment? }
+//   Delete       DELETE /reviews/:id
+//
+// Reviews are published as soon as they are submitted (the backend approves
+// them automatically), and appear on the product's page.
+
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
 import Link from "next/link";
 import { apiFetch, isLoggedIn } from "../../lib/auth";
+import { formatDate } from "../../lib/format";
+import StarRatingInput from "../../components/ui/StarRatingInput";
+import Stars from "../../components/ui/Stars";
 
-const C = {
-  saffron: "#E8560A", saffronBg: "#FFF3EC",
-  marigold: "#F5A623", marigoldLight: "#FAC65A",
-  cream: "#FFF8EE", creamDark: "#F0E4CE",
-  bark: "#5C3317",
-  text: "#2C1A0E", textMid: "#5C3D20", textLight: "#9A7050",
-  white: "#FFFFFF",
-  green: "#1A7A3C", greenBg: "#EDFAF3",
-  border: "#E8D8BC",
-  gold: "#C8860A", goldBg: "#FFFBE8",
-  red: "#C0392B", redBg: "#FFF0EE",
+const MAX_COMMENT_LENGTH = 2000; // ReviewCreateSchema on the backend
+
+type PendingItem = { productId: string; productSlug?: string; name: string; orderId?: string; deliveredOn?: string };
+type RawReview = {
+  _id: string;
+  productId?: { name?: string; slug?: string } | null;
+  rating: number;
+  title?: string;
+  comment?: string;
+  createdAt?: string;
 };
+type Tab = "pending" | "submitted";
 
-function Stars({ value, size = 14, onChange }: { value: number; size?: number; onChange?: (n: number) => void }) {
-  return (
-    <div style={{ display: "flex", gap: 2 }}>
-      {[1, 2, 3, 4, 5].map(n => (
-        <span key={n} onClick={onChange ? () => onChange(n) : undefined}
-          style={{ fontSize: size, color: n <= value ? C.gold : C.creamDark, cursor: onChange ? "pointer" : "default" }}>★</span>
-      ))}
-    </div>
-  );
-}
-
-type PendingItem = { productId: string; name: string; orderId?: string; deliveredOn?: string };
-type SubmittedReview = { id: string; name: string; rating: number; text: string; date: string };
-
-// Raw shapes as they come back from the API, before we map them into
-// PendingItem / SubmittedReview above.
-type RawPendingItem = { productId: string; name: string; orderId?: string; deliveredOn?: string };
-type RawReview = { _id: string; productId?: { name?: string }; rating: number; comment?: string; createdAt?: string };
-
-function WriteReviewForm({ item, onSubmit, onCancel, submitting }: {
-  item: PendingItem; onSubmit: (vals: { rating: number; text: string }) => void; onCancel: () => void; submitting: boolean;
+function ReviewForm({
+  item,
+  submitting,
+  onSubmit,
+  onCancel,
+}: {
+  item: PendingItem;
+  submitting: boolean;
+  onSubmit: (values: { rating: number; comment: string }) => void;
+  onCancel: () => void;
 }) {
   const [rating, setRating] = useState(0);
-  const [text, setText] = useState("");
+  const [comment, setComment] = useState("");
+  const [error, setError] = useState("");
+  const fieldId = `review-${item.productId}`;
+
+  const submit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (rating === 0) {
+      setError("Please choose a star rating.");
+      return;
+    }
+    setError("");
+    onSubmit({ rating, comment: comment.trim() });
+  };
 
   return (
-    <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px dashed ${C.border}` }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: C.textMid, marginBottom: 8 }}>Your Rating</div>
-      <Stars value={rating} size={24} onChange={setRating} />
-      <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Share your experience with this product…" rows={3}
-        style={{ width: "100%", marginTop: 12, padding: "10px 12px", borderRadius: 9, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.cream, outline: "none", resize: "vertical", boxSizing: "border-box", fontFamily: "inherit" }} />
-      <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-        <button disabled={rating === 0 || !text.trim() || submitting} onClick={() => onSubmit({ rating, text })}
-          style={{ padding: "9px 18px", borderRadius: 9, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 12, cursor: rating === 0 || !text.trim() || submitting ? "default" : "pointer", opacity: rating === 0 || !text.trim() || submitting ? 0.6 : 1 }}>
-          {submitting ? "Submitting…" : "Submit Review"}
-        </button>
-        <button onClick={onCancel} style={{ padding: "9px 18px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: C.white, color: C.textMid, fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+    <form onSubmit={submit} noValidate className="flex flex-col gap-4 border-t border-line pt-4">
+      <StarRatingInput name={`${fieldId}-rating`} value={rating} onChange={setRating} disabled={submitting} />
+
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={fieldId} className="text-[13px] font-semibold">
+          Your review (optional)
+        </label>
+        <textarea
+          id={fieldId}
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          maxLength={MAX_COMMENT_LENGTH}
+          rows={4}
+          disabled={submitting}
+          placeholder="What did you think of this product?"
+          className="input min-h-[112px] resize-y py-3"
+        />
       </div>
-    </div>
+
+      {error && (
+        <p role="alert" className="text-sm font-semibold text-danger">
+          {error}
+        </p>
+      )}
+
+      <div className="flex flex-wrap gap-3">
+        <button type="submit" disabled={submitting} className="btn btn-gold">
+          {submitting ? "Submitting…" : "Submit review"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={submitting} className="btn btn-outline">
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
 
 export default function ReviewsPage() {
-  const [tab, setTab] = useState("pending");
+  const [loggedIn, setLoggedIn] = useState<boolean | null>(null); // null until checked in the browser
+  const [tab, setTab] = useState<Tab>("pending");
   const [pending, setPending] = useState<PendingItem[]>([]);
-  const [submitted, setSubmitted] = useState<SubmittedReview[]>([]);
+  const [submitted, setSubmitted] = useState<RawReview[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [writingId, setWritingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const load = () => {
-    if (!isLoggedIn()) { setError("Please log in to see your reviews."); setLoading(false); return; }
+  const load = async () => {
     setLoading(true);
     setError("");
-    Promise.all([
-      apiFetch<{ data: { pending: RawPendingItem[] } }>("/reviews/pending"),
-      apiFetch<{ data: { reviews: RawReview[] } }>("/reviews/mine"),
-    ])
-      .then(([pendingRes, mineRes]) => {
-        if (!pendingRes.ok) throw new Error(pendingRes.body.message || "Couldn't load pending reviews.");
-        if (!mineRes.ok) throw new Error(mineRes.body.message || "Couldn't load your reviews.");
-        setPending(pendingRes.body.data.pending.map((p: RawPendingItem) => ({
-          productId: p.productId, name: p.name, orderId: p.orderId,
-          deliveredOn: p.deliveredOn ? new Date(p.deliveredOn).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "",
-        })));
-        setSubmitted(mineRes.body.data.reviews.map((r: RawReview) => ({
-          id: r._id, name: r.productId?.name || "Product", rating: r.rating, text: r.comment || "",
-          date: r.createdAt ? new Date(r.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "",
-        })));
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "Something went wrong."))
-      .finally(() => setLoading(false));
+    try {
+      const [pendingRes, mineRes] = await Promise.all([
+        apiFetch<{ data: { pending: PendingItem[] } }>("/reviews/pending"),
+        apiFetch<{ data: { reviews: RawReview[] } }>("/reviews/mine"),
+      ]);
+      if (!pendingRes.ok) throw new Error(pendingRes.body.message || "We couldn't load the products waiting for a review.");
+      if (!mineRes.ok) throw new Error(mineRes.body.message || "We couldn't load your reviews.");
+      setPending(pendingRes.body.data.pending || []);
+      setSubmitted(mineRes.body.data.reviews || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(load, []);
+  useEffect(() => {
+    const signedIn = isLoggedIn();
+    setLoggedIn(signedIn);
+    if (signedIn) load();
+    else setLoading(false);
+  }, []);
 
-  const handleSubmit = async (item: PendingItem, { rating, text }: { rating: number; text: string }) => {
+  const submitReview = async (item: PendingItem, values: { rating: number; comment: string }) => {
     setSubmitting(true);
+    setError("");
     try {
       const { ok, body } = await apiFetch("/reviews", {
         method: "POST",
-        body: JSON.stringify({ productId: item.productId, rating, comment: text }),
+        body: JSON.stringify({
+          productId: item.productId,
+          rating: values.rating,
+          ...(values.comment ? { comment: values.comment } : {}),
+        }),
       });
-      if (!ok) throw new Error(body.message || "Couldn't submit review.");
+      if (!ok) throw new Error(body.message || "We couldn't submit your review. Please try again.");
       setWritingId(null);
       setTab("submitted");
-      load(); // refresh both lists from the server rather than guessing the new state locally
+      await load(); // both lists change, so take them from the server
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
+      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
     } finally {
       setSubmitting(false);
     }
   };
 
   const deleteReview = async (id: string) => {
-    const { ok, body } = await apiFetch(`/reviews/${id}`, { method: "DELETE" });
-    if (!ok) { setError(body.message || "Couldn't delete review."); return; }
-    load();
+    setDeletingId(id);
+    setError("");
+    try {
+      const { ok, body } = await apiFetch(`/reviews/${id}`, { method: "DELETE" });
+      if (!ok) throw new Error(body.message || "We couldn't delete this review.");
+      setConfirmDeleteId(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "pending", label: `To review (${pending.length})` },
+    { id: "submitted", label: `Your reviews (${submitted.length})` },
+  ];
+
   return (
-    <div style={{ minHeight: "100vh", background: C.cream, fontFamily: "'Segoe UI','Helvetica Neue',sans-serif" }}>
-      <nav style={{ background: C.white, borderBottom: `1px solid ${C.border}`, padding: "0 24px" }}>
-        <div style={{ maxWidth: 760, margin: "0 auto", height: 60, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
-            <span style={{ fontSize: 20 }}>🪔</span>
-            <span style={{ fontFamily: "'Georgia',serif", fontWeight: 700, fontSize: 16, color: C.saffron }}>nityasamagri</span>
-          </Link>
-          <Link href="/account" style={{ fontSize: 13, color: C.textMid, textDecoration: "none", fontWeight: 600 }}>My Account →</Link>
+    <>
+      <div className="border-b border-line bg-offwhite">
+        <div className="site-container flex flex-col gap-2.5 py-6 md:py-7">
+          <nav aria-label="Breadcrumb">
+            <ol className="flex flex-wrap items-center gap-x-2 text-[13px] text-slate">
+              <li>
+                <Link href="/account" className="inline-flex min-h-[32px] items-center hover:text-navy">
+                  My Account
+                </Link>
+              </li>
+              <li className="flex items-center gap-x-2">
+                <span aria-hidden="true">/</span>
+                <span aria-current="page">My Reviews</span>
+              </li>
+            </ol>
+          </nav>
+          <h1 className="heading-display text-[28px] md:text-[40px]">My Reviews</h1>
+          <p className="max-w-[640px] text-slate">Rate the products you have received. Your review appears on the product's page.</p>
         </div>
-      </nav>
+      </div>
 
-      <div style={{ maxWidth: 760, margin: "0 auto", padding: "32px 24px" }}>
-        <h1 style={{ fontFamily: "'Georgia',serif", fontSize: 26, color: C.text, margin: "0 0 6px" }}>My Reviews</h1>
-        <p style={{ fontSize: 13, color: C.textLight, margin: "0 0 24px" }}>Share your experience and help other customers choose well.</p>
-
-        {error && (
-          <div style={{ background: C.redBg, color: C.red, fontSize: 12, fontWeight: 600, padding: "10px 14px", borderRadius: 10, marginBottom: 16 }}>{error}</div>
-        )}
-
-        {loading ? (
-          <div style={{ padding: "40px 0", textAlign: "center", color: C.textLight, fontSize: 13 }}>Loading…</div>
+      <div className="site-container flex max-w-[860px] flex-col gap-5 pb-14 pt-6 md:pb-[72px] md:pt-9">
+        {loggedIn === false ? (
+          <div className="flex flex-col items-start gap-4">
+            <p className="text-slate">Please log in to see and write your reviews.</p>
+            <Link href="/login?next=/reviews" className="btn btn-gold">
+              Log in
+            </Link>
+          </div>
         ) : (
           <>
-            <div style={{ display: "flex", background: C.creamDark, borderRadius: 12, padding: 4, marginBottom: 24, width: "fit-content" }}>
-              {[["pending", `Pending (${pending.length})`], ["submitted", `Submitted (${submitted.length})`]].map(([k, l]) => (
-                <button key={k} onClick={() => setTab(k)} style={{
-                  padding: "9px 20px", borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 12,
-                  background: tab === k ? C.white : "transparent", color: tab === k ? C.saffron : C.textMid,
-                  boxShadow: tab === k ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
-                }}>{l}</button>
+            {error && (
+              <p role="alert" className="rounded border border-danger p-4 text-sm font-semibold text-danger">
+                {error}
+              </p>
+            )}
+
+            <div role="group" aria-label="Choose a list" className="flex flex-wrap gap-2">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  aria-pressed={tab === t.id}
+                  onClick={() => setTab(t.id)}
+                  className={`inline-flex min-h-[44px] items-center rounded-full border px-4 text-sm font-medium ${
+                    tab === t.id ? "border-navy bg-navy text-white" : "border-field bg-white text-navy hover:border-navy"
+                  }`}
+                >
+                  {t.label}
+                </button>
               ))}
             </div>
 
-            {tab === "pending" ? (
+            {loading ? (
+              <p className="text-sm text-slate">Loading…</p>
+            ) : tab === "pending" ? (
               pending.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "60px 0", color: C.textLight }}>
-                  <div style={{ fontSize: 40, marginBottom: 10 }}>✅</div>
-                  <div style={{ fontSize: 14 }}>No pending reviews — you're all caught up!</div>
+                <div className="flex flex-col items-start gap-4 rounded-md border border-line bg-offwhite p-6">
+                  <p className="text-slate">
+                    Nothing to review right now. Products appear here once an order has been delivered.
+                  </p>
+                  <Link href="/account" className="btn btn-navy">
+                    View my orders
+                  </Link>
                 </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  {pending.map(item => (
-                    <div key={item.productId} style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "18px 20px" }}>
-                      <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-                        <div style={{ width: 48, height: 48, borderRadius: 10, background: C.cream, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>🪔</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{item.name}</div>
-                          <div style={{ fontSize: 12, color: C.textLight, marginTop: 2 }}>Order #{item.orderId} · Delivered {item.deliveredOn}</div>
+                <ul className="flex flex-col gap-3">
+                  {pending.map((item) => (
+                    <li key={item.productId} className="flex flex-col gap-4 rounded-md border border-line p-4 md:p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex min-w-[180px] flex-1 flex-col gap-0.5">
+                          <p className="text-[15px] font-semibold">
+                            {item.productSlug ? (
+                              <Link href={`/product/${item.productSlug}`} className="hover:text-navy-hover">
+                                {item.name}
+                              </Link>
+                            ) : (
+                              item.name
+                            )}
+                          </p>
+                          <p className="text-[13px] text-slate">
+                            {item.orderId ? `Order ${item.orderId}` : ""}
+                            {item.orderId && item.deliveredOn ? " · " : ""}
+                            {item.deliveredOn ? `Delivered ${formatDate(item.deliveredOn)}` : ""}
+                          </p>
                         </div>
                         {writingId !== item.productId && (
-                          <button onClick={() => setWritingId(item.productId)} style={{ padding: "8px 16px", borderRadius: 9, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 12, cursor: "pointer", flexShrink: 0 }}>
-                            ✍️ Write a Review
+                          <button type="button" onClick={() => setWritingId(item.productId)} className="btn btn-gold min-h-[44px] px-4">
+                            Write a review
                           </button>
                         )}
                       </div>
                       {writingId === item.productId && (
-                        <WriteReviewForm item={item} submitting={submitting} onSubmit={(vals) => handleSubmit(item, vals)} onCancel={() => setWritingId(null)} />
+                        <ReviewForm
+                          item={item}
+                          submitting={submitting}
+                          onSubmit={(values) => submitReview(item, values)}
+                          onCancel={() => setWritingId(null)}
+                        />
                       )}
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ul>
               )
+            ) : submitted.length === 0 ? (
+              <p className="rounded-md border border-line bg-offwhite p-6 text-slate">You have not written any reviews yet.</p>
             ) : (
-              submitted.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "60px 0", color: C.textLight }}>
-                  <div style={{ fontSize: 40, marginBottom: 10 }}>⭐</div>
-                  <div style={{ fontSize: 14 }}>You haven't submitted any reviews yet.</div>
-                </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  {submitted.map(r => (
-                    <div key={r.id} style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "18px 20px" }}>
-                      <div style={{ display: "flex", gap: 14 }}>
-                        <div style={{ width: 48, height: 48, borderRadius: 10, background: C.cream, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>🪔</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
-                            <div>
-                              <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{r.name}</div>
-                              <div style={{ marginTop: 4 }}><Stars value={r.rating} /></div>
-                            </div>
-                            <span style={{ fontSize: 11, color: C.textLight, whiteSpace: "nowrap" }}>{r.date}</span>
-                          </div>
-                          <p style={{ fontSize: 13, color: C.textMid, lineHeight: 1.6, margin: "10px 0" }}>{r.text}</p>
-                          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                            <span onClick={() => deleteReview(r.id)} style={{ fontSize: 11, color: C.red, fontWeight: 600, cursor: "pointer" }}>Delete</span>
-                          </div>
-                        </div>
-                      </div>
+              <ul className="flex flex-col gap-3">
+                {submitted.map((r) => (
+                  <li key={r._id} className="flex flex-col gap-2.5 rounded-md border border-line p-4 md:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1">
+                      <p className="text-[15px] font-semibold">
+                        {r.productId?.slug ? (
+                          <Link href={`/product/${r.productId.slug}`} className="hover:text-navy-hover">
+                            {r.productId.name || "Product"}
+                          </Link>
+                        ) : (
+                          r.productId?.name || "Product no longer available"
+                        )}
+                      </p>
+                      <span className="text-[13px] text-slate">{formatDate(r.createdAt)}</span>
                     </div>
-                  ))}
-                </div>
-              )
+                    <Stars rating={r.rating} />
+                    {r.title && <p className="font-semibold">{r.title}</p>}
+                    {r.comment && <p className="text-sm leading-relaxed text-slate">{r.comment}</p>}
+
+                    {confirmDeleteId === r._id ? (
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <span className="text-sm font-semibold">Delete this review?</span>
+                        <button
+                          type="button"
+                          disabled={deletingId === r._id}
+                          onClick={() => deleteReview(r._id)}
+                          className="btn min-h-[40px] bg-danger px-3 text-white"
+                        >
+                          {deletingId === r._id ? "Deleting…" : "Delete"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={deletingId === r._id}
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="btn btn-outline min-h-[40px] px-3"
+                        >
+                          Keep
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(r._id)}
+                        className="min-h-[36px] self-start text-[13px] font-semibold text-slate underline hover:text-danger"
+                      >
+                        Delete review
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
             )}
           </>
         )}
       </div>
-    </div>
+    </>
   );
 }

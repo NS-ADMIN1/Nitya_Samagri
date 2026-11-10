@@ -1,272 +1,413 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
-import Link from "next/link";
-import { apiFetch, isLoggedIn } from "../../lib/auth";
+// apps/web/app/delivery/page.tsx — track one order.
+//
+//   /delivery?orderId=<id>   that order
+//   /delivery                the customer's most recent order
+//
+// Data: GET /orders/:orderId (order, items and status timeline) and, when
+// the courier has the parcel, GET /integrations/shipping/track/:orderId.
+// Courier details are shown only if that call returns real values.
 
-const C = {
-  saffron: "#E8560A", saffronBg: "#FFF3EC",
-  cream: "#FFF8EE", creamDark: "#F0E4CE",
-  text: "#2C1A0E", textMid: "#5C3D20", textLight: "#9A7050",
-  white: "#FFFFFF",
-  green: "#1A7A3C", greenBg: "#EDFAF3",
-  border: "#E8D8BC",
-  blue: "#1A5C9E", blueBg: "#EEF4FF",
-  red: "#C0392B", redBg: "#FFF0EE",
+import { Suspense, useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { apiFetch, isLoggedIn } from "../../lib/auth";
+import { formatPrice } from "../../lib/format";
+import { orderStatusLabel, paymentMethodLabel } from "../../lib/orders";
+import { BRAND } from "../../lib/theme";
+import Icon from "../../components/ui/Icon";
+import StatusBadge from "../../components/ui/StatusBadge";
+
+// The backend's order statuses (Order.ts) as the steps a customer sees.
+// "ready_for_pickup" is still the packed step from the customer's side.
+const STAGES = [
+  { key: "pending", label: "Order placed" },
+  { key: "confirmed", label: "Order confirmed" },
+  { key: "processing", label: "Packed" },
+  { key: "shipped", label: "Shipped" },
+  { key: "out_for_delivery", label: "Out for delivery" },
+  { key: "delivered", label: "Delivered" },
+];
+const STAGE_ALIAS: Record<string, string> = { ready_for_pickup: "processing" };
+
+// Statuses that are not a step on the way to delivery.
+const EXCEPTIONS: Record<string, string> = {
+  cancelled: "This order was cancelled.",
+  returned: "This order was returned.",
+  refunded: "This order was refunded.",
+  NDR: "A delivery attempt was not successful. Please contact us if you need help with this order.",
 };
 
-// backend Order.status enum (Order.ts) → the linear stage list this page
-// draws. NDR/cancelled/returned/refunded are terminal/exception states
-// shown as a banner instead of forced into the linear timeline.
-const STAGES = [
-  { key: "pending",           label: "Order Placed",     icon: "🧾" },
-  { key: "confirmed",         label: "Order Confirmed",  icon: "✅" },
-  { key: "processing",        label: "Packed",           icon: "📦" },
-  { key: "shipped",           label: "Shipped",          icon: "🚚" },
-  { key: "out_for_delivery",  label: "Out for Delivery", icon: "🛵" },
-  { key: "delivered",         label: "Delivered",        icon: "🏠" },
-];
-const EXCEPTION_STATUSES = ["NDR", "cancelled", "returned", "refunded"];
-
-function currentIndex(status: string) {
-  return STAGES.findIndex(s => s.key === status);
-}
-
-// Loosely-typed shapes just strict enough to stop TS from collapsing these
-// to `never` after the early-return guards below. Swap for real Order /
-// Address / TimelineEvent / Tracking types if/when they exist in this app.
 type OrderItem = { productName: string; qty: number; price: number };
 type TimelineEvent = { status: string; createdAt: string };
-type Address = { fullName: string; line1: string; line2?: string; city: string; state: string; pincode: string; phone: string };
+type AddressDoc = { fullName?: string; line1?: string; line2?: string; city?: string; state?: string; pincode?: string; phone?: string };
+type AddressSnapshot = { name?: string; line1?: string; line2?: string; city?: string; state?: string; pin?: string };
 type Order = {
   orderId: string;
   status: string;
-  total: number;
   createdAt: string;
-  addressId: Address;
-  items: OrderItem[];
+  paymentMethod?: string;
+  paymentStatus?: string;
+  subtotal?: number;
+  gst?: number;
+  shipping?: number;
+  discount?: number;
+  total: number;
+  address?: AddressSnapshot | null; // copied onto the order when it was placed
+  addressId?: AddressDoc | null; // the saved address, if it still exists
+  items?: OrderItem[];
   timeline?: TimelineEvent[];
 };
-type Tracking = { courierName?: string; awb?: string };
+type Tracking = { courierName?: string; awb?: string; currentLocation?: string };
 
-function DeliveryTrackingContent() {
+type LoadState =
+  | { kind: "loading" }
+  | { kind: "loggedOut" }
+  | { kind: "noOrders" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; order: Order };
+
+function formatDateTime(value: string | undefined): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function Panel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-4 rounded-md border border-line p-4 md:p-6">
+      <h2 className="heading-display text-[22px] md:text-2xl">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function Message({ title, text, children }: { title: string; text: string; children?: ReactNode }) {
+  return (
+    <div className="site-container flex flex-col items-start gap-4 py-14">
+      <h1 className="heading-display text-[28px] md:text-[38px]">{title}</h1>
+      <p className="text-slate">{text}</p>
+      <div className="flex flex-wrap gap-3">{children}</div>
+    </div>
+  );
+}
+
+function Timeline({ order }: { order: Order }) {
+  const stageKey = STAGE_ALIAS[order.status] || order.status;
+  const current = STAGES.findIndex((s) => s.key === stageKey);
+
+  return (
+    <ol className="flex flex-col">
+      {STAGES.map((stage, i) => {
+        const done = i <= current;
+        const isCurrent = i === current;
+        const isLast = i === STAGES.length - 1;
+        const event = order.timeline?.find((t) => (STAGE_ALIAS[t.status] || t.status) === stage.key);
+        const when = formatDateTime(event?.createdAt);
+
+        return (
+          <li key={stage.key} className="flex gap-4" aria-current={isCurrent ? "step" : undefined}>
+            <div className="flex flex-col items-center">
+              <span
+                className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-[13px] font-bold ${
+                  isCurrent
+                    ? "border-gold bg-gold text-navy"
+                    : done
+                      ? "border-navy bg-navy text-white"
+                      : "border-field bg-white text-slate"
+                }`}
+              >
+                {done ? <Icon name="check" size={18} /> : i + 1}
+              </span>
+              {!isLast && <span aria-hidden="true" className={`my-1 w-0.5 flex-1 ${i < current ? "bg-navy" : "bg-line"}`} />}
+            </div>
+            <div className={isLast ? "" : "pb-7"}>
+              <p className={`text-[15px] ${done ? "font-semibold text-navy" : "font-medium text-slate"}`}>
+                {stage.label}
+                {done && !isCurrent && <span className="sr-only"> (completed)</span>}
+              </p>
+              {when && <p className="text-[13px] text-slate">{when}</p>}
+              {isCurrent && <p className="text-[13px] font-semibold text-gold-ink">Current status</p>}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function TrackingContent() {
   const searchParams = useSearchParams();
   const orderIdParam = searchParams.get("orderId");
 
-  const [order, setOrder] = useState<Order | null>(null);
-  const [courier, setCourier] = useState<Tracking | null>(null); // best-effort — may stay null
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [courier, setCourier] = useState<Tracking | null>(null);
 
   useEffect(() => {
-    if (!isLoggedIn()) { setError("Please log in to track your orders."); setLoading(false); return; }
+    if (!isLoggedIn()) {
+      setState({ kind: "loggedOut" });
+      return undefined;
+    }
 
     let cancelled = false;
-    setLoading(true);
-    setError("");
+    setState({ kind: "loading" });
+    setCourier(null);
 
     (async () => {
       try {
         let orderId = orderIdParam;
         if (!orderId) {
-          // No order specified — fall back to the most recent order.
+          // No order named in the link — show the most recent one.
           const { ok, body } = await apiFetch<{ data: { orders: Order[] } }>("/orders?limit=1");
-          if (!ok) throw new Error(body.message || "Couldn't load your orders.");
+          if (!ok) throw new Error(body.message || "We couldn't load your orders.");
           const latest = body.data.orders?.[0];
-          if (!latest) { if (!cancelled) { setError("You don't have any orders yet."); setLoading(false); } return; }
+          if (!latest) {
+            if (!cancelled) setState({ kind: "noOrders" });
+            return;
+          }
           orderId = latest.orderId;
         }
 
-        const { ok, body } = await apiFetch<{ data: { order: Order } }>(`/orders/${orderId}`);
+        const { ok, body } = await apiFetch<{ data: { order: Order } }>(`/orders/${encodeURIComponent(orderId)}`);
         if (cancelled) return;
-        if (!ok) throw new Error(body.message || "Order not found.");
-        setOrder(body.data.order);
+        if (!ok) throw new Error(body.message || "We couldn't find that order.");
+        setState({ kind: "ready", order: body.data.order });
 
-        // Live courier info is best-effort — Eshopbox may not be configured
-        // in this environment, or the order may not be handed off yet, so a
-        // failure here just means the courier card stays hidden.
-        apiFetch<{ data: { tracking: Tracking } }>(`/integrations/shipping/track/${orderId}`)
+        // Courier details are optional: the shipping partner may not have
+        // the parcel yet. A failure just leaves the courier panel out.
+        apiFetch<{ data: { tracking?: Tracking } }>(`/integrations/shipping/track/${encodeURIComponent(orderId)}`)
           .then(({ ok: trackOk, body: trackBody }) => {
-            if (!cancelled && trackOk && trackBody.data?.tracking) setCourier(trackBody.data.tracking);
+            const tracking = trackOk ? trackBody.data?.tracking : null;
+            if (!cancelled && tracking && (tracking.courierName || tracking.awb)) setCourier(tracking);
           })
           .catch(() => {});
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Something went wrong.");
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setState({ kind: "error", message: err instanceof Error ? err.message : "Something went wrong. Please try again." });
+        }
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [orderIdParam]);
 
-  if (loading) {
+  if (state.kind === "loading") {
+    return <div className="site-container py-16 text-center text-sm text-slate">Loading your order…</div>;
+  }
+
+  if (state.kind === "loggedOut") {
+    const back = orderIdParam ? `/delivery?orderId=${encodeURIComponent(orderIdParam)}` : "/delivery";
     return (
-      <div style={{ minHeight: "100vh", background: C.cream, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI','Helvetica Neue',sans-serif", color: C.textLight, fontSize: 14 }}>
-        Loading tracking info…
-      </div>
+      <Message title="Track your order" text="Please log in to see your order's status.">
+        <Link href={`/login?next=${encodeURIComponent(back)}`} className="btn btn-gold">
+          Log in
+        </Link>
+      </Message>
     );
   }
 
-  if (error || !order) {
+  if (state.kind === "noOrders") {
     return (
-      <div style={{ minHeight: "100vh", background: C.cream, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI','Helvetica Neue',sans-serif", gap: 10 }}>
-        <div style={{ fontSize: 40 }}>📦</div>
-        <div style={{ fontSize: 15, color: C.textMid, fontWeight: 600 }}>{error || "Order not found."}</div>
-        <Link href="/account" style={{ fontSize: 13, color: C.saffron, fontWeight: 700, textDecoration: "none" }}>Go to My Orders →</Link>
-      </div>
+      <Message title="No orders yet" text="When you place an order, you can follow it here.">
+        <Link href="/shop" className="btn btn-gold">
+          Shop all products
+        </Link>
+      </Message>
     );
   }
 
-  const idx = currentIndex(order.status);
-  const isException = EXCEPTION_STATUSES.includes(order.status);
-  const total = order.total;
-  const address = order.addressId; // populated Address doc (see order.routes.ts GET /:orderId)
+  if (state.kind === "error") {
+    return (
+      <Message title="We couldn't show this order" text={state.message}>
+        <Link href="/account" className="btn btn-navy">
+          Go to my orders
+        </Link>
+      </Message>
+    );
+  }
+
+  const { order } = state;
+  const exception = EXCEPTIONS[order.status];
+  const items = order.items || [];
+  const itemCount = items.reduce((sum, i) => sum + i.qty, 0);
+  const paid = order.paymentStatus === "paid";
+
+  // Prefer the address copied onto the order; fall back to the saved one.
+  const snapshot = order.address;
+  const saved = order.addressId;
+  const addressName = snapshot?.name || saved?.fullName || "";
+  const addressLines = [
+    snapshot?.line1 || saved?.line1,
+    snapshot?.line2 || saved?.line2,
+    snapshot?.city || saved?.city,
+    `${snapshot?.state || saved?.state || ""} ${snapshot?.pin || saved?.pincode || ""}`.trim(),
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   return (
-    <div style={{ minHeight: "100vh", background: C.cream, fontFamily: "'Segoe UI','Helvetica Neue',sans-serif" }}>
-      <nav style={{ background: C.white, borderBottom: `1px solid ${C.border}`, padding: "0 24px" }}>
-        <div style={{ maxWidth: 1000, margin: "0 auto", height: 60, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
-            <span style={{ fontSize: 20 }}>🪔</span>
-            <span style={{ fontFamily: "'Georgia',serif", fontWeight: 700, fontSize: 16, color: C.saffron }}>nityasamagri</span>
-          </Link>
-          <Link href="/account" style={{ fontSize: 13, color: C.textMid, textDecoration: "none", fontWeight: 600 }}>My Account →</Link>
-        </div>
-      </nav>
-
-      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "32px 24px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28, flexWrap: "wrap", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 12, color: C.textLight, marginBottom: 4 }}>Tracking Order</div>
-            <h1 style={{ fontFamily: "'Georgia',serif", fontSize: 26, color: C.text, margin: 0 }}>#{order.orderId}</h1>
-            <div style={{ fontSize: 13, color: C.textLight, marginTop: 4 }}>
-              Placed on {new Date(order.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" })}
-            </div>
+    <>
+      <div className="border-b border-line bg-offwhite">
+        <div className="site-container flex flex-wrap items-end justify-between gap-4 py-6 md:py-7">
+          <div className="flex flex-col gap-1.5">
+            <Link href="/account" className="inline-flex min-h-[32px] items-center gap-1 text-[13px] text-slate hover:text-navy">
+              <Icon name="chevronLeft" size={14} />
+              My orders
+            </Link>
+            <h1 className="heading-display text-[26px] md:text-[38px]">Order {order.orderId}</h1>
+            <p className="text-sm text-slate">Placed on {formatDateTime(order.createdAt)}</p>
           </div>
-          {isException ? (
-            <div style={{ background: C.redBg, border: `1px solid ${C.red}33`, borderRadius: 12, padding: "14px 20px", textAlign: "center" }}>
-              <div style={{ fontSize: 11, color: C.textLight, marginBottom: 2 }}>Status</div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: C.red, textTransform: "capitalize" }}>{order.status}</div>
-            </div>
+          <StatusBadge status={order.status} />
+        </div>
+      </div>
+
+      <div className="site-container flex flex-col gap-6 pb-14 pt-6 md:flex-row md:items-start md:gap-9 md:pb-[72px] md:pt-9">
+        <div className="flex min-w-0 flex-1 flex-col gap-5">
+          {exception ? (
+            <Panel title={orderStatusLabel(order.status)}>
+              <p className="text-slate">{exception}</p>
+              {order.status === "cancelled" && paid && (
+                <p className="text-slate">
+                  This order was paid online. For your refund, please write to{" "}
+                  <a href={`mailto:${BRAND.email}`} className="font-semibold text-navy underline">
+                    {BRAND.email}
+                  </a>{" "}
+                  with the order ID.
+                </p>
+              )}
+            </Panel>
           ) : (
-            <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 12, padding: "14px 20px", textAlign: "center" }}>
-              <div style={{ fontSize: 11, color: C.textLight, marginBottom: 2 }}>Current Status</div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: C.green, textTransform: "capitalize" }}>{order.status.replace(/_/g, " ")}</div>
-            </div>
+            <Panel title="Delivery status">
+              <Timeline order={order} />
+            </Panel>
+          )}
+
+          {courier && (
+            <Panel title="Courier">
+              <dl className="flex flex-col gap-2 text-sm">
+                {courier.courierName && (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-slate">Courier</dt>
+                    <dd className="font-semibold">{courier.courierName}</dd>
+                  </div>
+                )}
+                {courier.awb && (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-slate">Tracking number (AWB)</dt>
+                    <dd className="font-semibold">{courier.awb}</dd>
+                  </div>
+                )}
+                {courier.currentLocation && (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-slate">Last seen at</dt>
+                    <dd className="font-semibold">{courier.currentLocation}</dd>
+                  </div>
+                )}
+              </dl>
+            </Panel>
           )}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 24 }}>
-          {/* Left — timeline */}
-          <div>
-            {!isException && (
-              <div style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: "28px 32px", marginBottom: 20 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, color: C.text, marginBottom: 24 }}>Delivery Status</div>
-                {STAGES.map((s, i) => {
-                  const done = i <= idx;
-                  const isLast = i === STAGES.length - 1;
-                  const event = order.timeline?.find((t: TimelineEvent) => t.status === s.key);
-                  return (
-                    <div key={s.key} style={{ display: "flex", gap: 16 }}>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-                        <div style={{
-                          width: 36, height: 36, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 16, flexShrink: 0,
-                          background: done ? C.saffron : C.creamDark,
-                          color: done ? C.white : C.textLight,
-                          boxShadow: done && i === idx ? `0 0 0 3px ${C.saffron}33` : "none",
-                        }}>{done ? s.icon : "○"}</div>
-                        {!isLast && <div style={{ width: 2, flex: 1, minHeight: 32, background: i < idx ? C.saffron : C.creamDark, margin: "4px 0" }} />}
-                      </div>
-                      <div style={{ paddingBottom: isLast ? 0 : 28 }}>
-                        <div style={{ fontWeight: done ? 700 : 500, fontSize: 14, color: done ? C.text : C.textLight }}>{s.label}</div>
-                        <div style={{ fontSize: 12, color: C.textLight, marginTop: 2 }}>
-                          {event ? new Date(event.createdAt).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : (i === idx ? "In progress" : "")}
-                        </div>
-                        {i === idx && (
-                          <div style={{ marginTop: 8, display: "inline-block", background: C.saffronBg, color: C.saffron, fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999 }}>
-                            Current Status
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+        <div className="flex w-full flex-col gap-5 md:w-[380px] md:shrink-0">
+          {addressLines && (
+            <Panel title="Delivering to">
+              <p className="text-sm leading-relaxed">
+                {addressName && (
+                  <>
+                    <span className="font-semibold">{addressName}</span>
+                    <br />
+                  </>
+                )}
+                <span className="text-slate">{addressLines}</span>
+                {saved?.phone && (
+                  <>
+                    <br />
+                    <span className="text-slate">{saved.phone}</span>
+                  </>
+                )}
+              </p>
+            </Panel>
+          )}
 
-            {courier && (
-              <div style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: "20px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-                <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-                  <div style={{ width: 48, height: 48, borderRadius: "50%", background: C.blueBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>🛵</div>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{courier.courierName || "Courier assigned"}</div>
-                    <div style={{ fontSize: 12, color: C.textLight }}>{courier.awb ? `AWB ${courier.awb}` : ""}</div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right — order + address */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {address && (
-              <div style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: "20px 22px" }}>
-                <div style={{ fontWeight: 700, fontSize: 14, color: C.text, marginBottom: 14 }}>📍 Delivery Address</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 4 }}>{address.fullName}</div>
-                <div style={{ fontSize: 13, color: C.textMid, lineHeight: 1.6 }}>{address.line1}{address.line2 ? `, ${address.line2}` : ""}, {address.city}, {address.state} — {address.pincode}</div>
-                <div style={{ fontSize: 12, color: C.textLight, marginTop: 6 }}>📞 {address.phone}</div>
-              </div>
-            )}
-
-            <div style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: "20px 22px" }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: C.text, marginBottom: 14 }}>📦 Items ({order.items?.length || 0})</div>
-              {(order.items || []).map((i: OrderItem, idx2: number) => (
-                <div key={idx2} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, fontSize: 13 }}>
-                  <div>
-                    <div style={{ color: C.text, fontWeight: 500 }}>{i.productName}</div>
-                    <div style={{ fontSize: 11, color: C.textLight }}>Qty {i.qty}</div>
-                  </div>
-                  <span style={{ fontWeight: 700, color: C.text }}>₹{(i.price * i.qty).toLocaleString()}</span>
-                </div>
+          <Panel title={`Items (${itemCount})`}>
+            <ul className="flex flex-col gap-2.5 text-sm">
+              {items.map((item, i) => (
+                <li key={`${item.productName}-${i}`} className="flex justify-between gap-3">
+                  <span>
+                    {item.productName} <span className="text-slate">× {item.qty}</span>
+                  </span>
+                  <span>{formatPrice(item.price * item.qty)}</span>
+                </li>
               ))}
-              <div style={{ borderTop: `1.5px dashed ${C.border}`, marginTop: 10, paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700, color: C.saffron }}>
-                <span>Total</span><span>₹{total.toLocaleString()}</span>
+            </ul>
+            <dl className="flex flex-col gap-1.5 border-t border-line pt-3 text-sm">
+              {order.subtotal != null && (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-slate">Subtotal</dt>
+                  <dd>{formatPrice(order.subtotal)}</dd>
+                </div>
+              )}
+              {order.gst != null && (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-slate">GST</dt>
+                  <dd>{formatPrice(order.gst)}</dd>
+                </div>
+              )}
+              {order.shipping != null && (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-slate">Delivery</dt>
+                  <dd>{order.shipping === 0 ? "Free" : formatPrice(order.shipping)}</dd>
+                </div>
+              )}
+              {!!order.discount && order.discount > 0 && (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-slate">Coupon discount</dt>
+                  <dd>− {formatPrice(order.discount)}</dd>
+                </div>
+              )}
+              <div className="flex justify-between gap-3 pt-1 text-base font-bold">
+                <dt>Total</dt>
+                <dd>{formatPrice(order.total)}</dd>
               </div>
-            </div>
+              {order.paymentMethod && (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-slate">Payment</dt>
+                  <dd>
+                    {paymentMethodLabel(order.paymentMethod)}
+                    {paid ? " · Paid" : ""}
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </Panel>
 
-            <div style={{ background: C.saffronBg, borderRadius: 16, padding: "16px 20px" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 6 }}>Need help with this order?</div>
-              <div style={{ fontSize: 12, color: C.textMid, marginBottom: 12 }}>Report a delay, damaged item, or ask a question.</div>
-              <a href={`mailto:support@nityasamagri.in?subject=Help with order ${order.orderId}`} style={{ display: "block", textAlign: "center", width: "100%", padding: "10px", borderRadius: 9, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 12, textDecoration: "none", boxSizing: "border-box" }}>
-                Contact Support
-              </a>
-            </div>
-          </div>
+          <section className="flex flex-col gap-3 rounded-md border border-line border-t-[3px] border-t-gold bg-offwhite p-4 md:p-6">
+            <h2 className="text-base font-semibold">Need help with this order?</h2>
+            <p className="text-sm text-slate">Tell us about a delay or a damaged item, or ask a question.</p>
+            <a
+              href={`mailto:${BRAND.email}?subject=${encodeURIComponent(`Help with order ${order.orderId}`)}`}
+              className="btn btn-navy"
+            >
+              Email support
+            </a>
+          </section>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
-// useSearchParams() (used above) opts this route into client-side rendering
-// for the search-param-dependent parts, so Next.js needs a Suspense boundary
-// here to prerender a fallback shell — without it, `next build` fails with
-// "useSearchParams() should be wrapped in a suspense boundary".
 export default function DeliveryTrackingPage() {
+  // useSearchParams needs a Suspense boundary so the page can still be
+  // statically generated at build time.
   return (
-    <Suspense fallback={<DeliveryLoadingFallback />}>
-      <DeliveryTrackingContent />
+    <Suspense fallback={<div className="site-container py-16 text-center text-sm text-slate">Loading your order…</div>}>
+      <TrackingContent />
     </Suspense>
-  );
-}
-
-function DeliveryLoadingFallback() {
-  return (
-    <div style={{ minHeight: "100vh", background: C.cream, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI','Helvetica Neue',sans-serif", color: C.textLight, fontSize: 14 }}>
-      Loading tracking info…
-    </div>
   );
 }

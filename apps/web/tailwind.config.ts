@@ -1,43 +1,56 @@
 import type { Config } from "tailwindcss";
 
+// Nitya Samagri brand palette — navy + gold on white.
+// The same values live in lib/theme.js (for the few places that need them
+// in JS) and as CSS variables in app/globals.css. Change all three together.
 const config: Config = {
   content: [
-    "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
-    "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./lib/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
     extend: {
       colors: {
-        saffron:  { DEFAULT: "#E8560A", dark: "#B8400A", light: "#F47B3A", 50: "#FFF3EC", 100: "#FFE4D0", 500: "#E8560A", 700: "#B8400A" },
-        marigold: { DEFAULT: "#F5A623", light: "#FAC65A", 50: "#FFFBE8" },
-        bark:     { DEFAULT: "#5C3317", light: "#7A4A28" },
-        cream:    { DEFAULT: "#FFF8EE", dark: "#F0E4CE" },
+        navy: {
+          DEFAULT: "#071C42",
+          deep:    "#041330", // footer
+          soft:    "#12306A", // panels on navy
+          hover:   "#0E2F6B",
+          line:    "#1B3260", // hairlines on navy
+        },
+        gold: {
+          DEFAULT: "#D6AF43",
+          dark:    "#C9A036", // hover
+          ink:     "#7A5C0E", // gold-toned text on white (passes 4.5:1)
+        },
+        offwhite: "#F8F8F5",
+        mist:     "#F1F2F4",
+        line:     "#E1E3E8",
+        field:    "#B9BECA", // input borders
+        slate:    { DEFAULT: "#4A5470", light: "#DDE2EE" },
+        success:  "#1E5B32",
+        danger:   "#A32A1E",
       },
       fontFamily: {
         sans:  ["var(--font-inter)", "system-ui", "sans-serif"],
         serif: ["var(--font-playfair)", "Georgia", "serif"],
       },
+      maxWidth: {
+        site: "1280px",
+      },
+      boxShadow: {
+        card:     "0 1px 2px rgba(7,28,66,0.04)",
+        elevated: "0 12px 32px rgba(7,28,66,0.12)",
+      },
       animation: {
-        "spin-slow": "spin 3s linear infinite",
-        "fade-up":   "fadeUp 0.5s ease forwards",
-        "pulse-soft":"pulse 2s ease-in-out infinite",
+        "fade-up": "fadeUp 0.4s ease forwards",
       },
       keyframes: {
         fadeUp: {
-          "0%":   { opacity: "0", transform: "translateY(16px)" },
+          "0%":   { opacity: "0", transform: "translateY(12px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
-      },
-      boxShadow: {
-        saffron:  "0 4px 24px rgba(232,86,10,0.15)",
-        card:     "0 2px 16px rgba(92,51,23,0.08)",
-        elevated: "0 8px 32px rgba(92,51,23,0.12)",
-      },
-      borderRadius: {
-        xl2: "1rem",
-        xl3: "1.5rem",
-        xl4: "2rem",
       },
     },
   },

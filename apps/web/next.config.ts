@@ -86,8 +86,8 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [
       // Legacy URL support
-      { source: "/shop",         destination: "/",          permanent: false },
-      { source: "/products",     destination: "/",          permanent: false },
+      // "/shop" is a real page (app/shop/page.jsx) — it must not redirect.
+      { source: "/products",     destination: "/shop",      permanent: false },
       { source: "/my-account",   destination: "/account",   permanent: true  },
       { source: "/signin",       destination: "/login",     permanent: true  },
       { source: "/signup",       destination: "/login",     permanent: true  },

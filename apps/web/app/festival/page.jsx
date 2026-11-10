@@ -1,12 +1,40 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// apps/web/app/festival/page.jsx — all festival collections.
+// Active and upcoming festivals from GET /cms/festivals-public, which are
+// created and scheduled in Admin → Store.
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch } from "../../lib/auth";
-import { PageShell, COLORS } from "../../lib/storefront";
+import { formatDate } from "../../lib/format";
+import ListingHeader from "../../components/shop/ListingHeader";
+import Icon from "../../components/ui/Icon";
 
-function fmt(d) {
-  try { return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); } catch { return ""; }
+function FestivalCard({ festival }) {
+  const live = festival.status === "active";
+  const productCount = (festival.productIds || []).length;
+  const starts = formatDate(festival.startDate);
+
+  return (
+    <Link
+      href={`/festival/${festival.slug}`}
+      className="group flex h-full flex-col gap-3 rounded-md border border-line border-t-[3px] border-t-gold bg-white p-5 transition-shadow hover:shadow-elevated md:p-6"
+    >
+      <p className="eyebrow">{live ? "Live now" : starts ? `Starts ${starts}` : "Coming soon"}</p>
+      <h2 className="heading-display text-2xl md:text-[26px]">{festival.name}</h2>
+      {festival.description && <p className="text-sm leading-relaxed text-slate">{festival.description}</p>}
+      <p className="mt-auto flex items-center justify-between gap-3 pt-2 text-sm">
+        <span className="text-slate">
+          {productCount} product{productCount === 1 ? "" : "s"}
+        </span>
+        <span className="inline-flex items-center gap-1 font-semibold">
+          Explore
+          <Icon name="chevronRight" size={16} className="transition-transform group-hover:translate-x-0.5" />
+        </span>
+      </p>
+    </Link>
+  );
 }
 
 export default function FestivalsPage() {
@@ -19,43 +47,62 @@ export default function FestivalsPage() {
     apiFetch("/cms/festivals-public")
       .then(({ ok, body }) => {
         if (cancelled) return;
-        if (!ok) { setError(body.message || "Couldn't load festivals."); return; }
-        setFestivals(body.data.items || []);
+        if (!ok) {
+          setError(body?.message || "Couldn't load the festival collections.");
+          return;
+        }
+        setFestivals(body?.data?.items || []);
       })
-      .catch(() => { if (!cancelled) setError("Couldn't reach the server. Please try again."); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+      .catch(() => {
+        if (!cancelled) setError("Couldn't reach the server. Please try again.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
-    <PageShell>
-      <h1 style={{ fontFamily: "'Georgia', serif", fontSize: 32, margin: "0 0 6px" }}>Festival Collections</h1>
-      <p style={{ color: COLORS.textLight, fontSize: 14, margin: "0 0 28px" }}>Curated kits and complete puja packages for every occasion.</p>
+    <>
+      <ListingHeader
+        crumbs={[{ label: "Home", href: "/" }, { label: "Festival Samagri" }]}
+        title="Festival Samagri"
+        description="Everything you need for each festival's pooja, gathered in one place."
+      />
 
-      {loading ? (
-        <div style={{ padding: "48px 0", textAlign: "center", color: COLORS.textLight }}>Loading festivals…</div>
-      ) : error ? (
-        <div style={{ padding: "48px 0", textAlign: "center", color: "#C0392B" }}>{error}</div>
-      ) : festivals.length === 0 ? (
-        <div style={{ padding: "48px 0", textAlign: "center", color: COLORS.textLight }}>No festival collections right now. Check back soon!</div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 20 }}>
-          {festivals.map((f) => {
-            const color = f.color || COLORS.saffron;
-            return (
-              <Link key={f._id} href={`/festival/${f.slug}`} style={{ textDecoration: "none", background: COLORS.white, border: `1.5px solid ${COLORS.creamDark}`, borderTop: `5px solid ${color}`, borderRadius: 16, padding: "24px 20px", display: "block" }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
-                  {f.status === "active" ? "Live now" : `Starts ${fmt(f.startDate)}`}
-                </div>
-                <div style={{ fontFamily: "'Georgia', serif", fontSize: 24, fontWeight: 700, color: COLORS.text, marginBottom: 10 }}>{f.icon ? `${f.icon} ` : ""}{f.name}</div>
-                {f.description && <div style={{ fontSize: 13, color: COLORS.textMid, marginBottom: 14, lineHeight: 1.5 }}>{f.description}</div>}
-                <div style={{ fontSize: 12, color: COLORS.textLight, marginBottom: 12 }}>{(f.productIds || []).length} products</div>
-                <span style={{ fontSize: 13, fontWeight: 700, color }}>Explore →</span>
-              </Link>
-            );
-          })}
-        </div>
-      )}
-    </PageShell>
+      <div className="site-container pb-14 pt-6 md:pb-[72px] md:pt-9">
+        {loading ? (
+          <div aria-hidden="true" className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-[200px] animate-pulse rounded-md bg-mist" />
+            ))}
+          </div>
+        ) : error ? (
+          <p role="alert" className="rounded-md border border-line bg-offwhite p-8 text-center text-sm text-danger">
+            {error}
+          </p>
+        ) : festivals.length === 0 ? (
+          <div className="flex flex-col items-center gap-4 rounded-md border border-line bg-offwhite px-6 py-12 text-center">
+            <p className="font-serif text-xl font-semibold">No festival collections right now</p>
+            <p className="max-w-[420px] text-sm text-slate">
+              Collections appear here ahead of each festival. Until then, the daily essentials are always available.
+            </p>
+            <Link href="/shop" className="btn btn-navy">
+              Shop all products
+            </Link>
+          </div>
+        ) : (
+          <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {festivals.map((f) => (
+              <li key={f._id}>
+                <FestivalCard festival={f} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
   );
 }

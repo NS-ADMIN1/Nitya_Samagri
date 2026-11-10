@@ -1,728 +1,406 @@
 "use client";
 
-import { useState, useEffect } from "react";
+// apps/web/app/cart/page.jsx — cart and checkout.
+//
+// Three steps on one page: Cart → Delivery address → Payment.
+//
+// Placing an order (unchanged backend contract):
+//   1. POST /orders                    creates the order, reserves stock, validates any coupon
+//   2. cash on delivery                → done
+//      online payment                  → POST /payments/create-order → Razorpay window
+//                                        → POST /payments/verify
+//
+// The amounts shown before step 1 come from lib/pricing.js, which mirrors
+// the backend's pricing. Once the order exists, the backend's own total is
+// what is shown and charged.
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCartStore } from "../../lib/cartStore";
 import { apiFetch, isLoggedIn } from "../../lib/auth";
- 
-// ─── THEME ────────────────────────────────────────────────────────────────────
-const C = {
-  saffron: "#E8560A", saffronDark: "#B8400A", saffronBg: "#FFF3EC",
-  marigold: "#F5A623", marigoldLight: "#FAC65A",
-  cream: "#FFF8EE", creamDark: "#F0E4CE",
-  bark: "#5C3317", barkLight: "#7A4A28",
-  text: "#2C1A0E", textMid: "#5C3D20", textLight: "#9A7050",
-  white: "#FFFFFF",
-  green: "#1A7A3C", greenBg: "#EDFAF3",
-  border: "#E8D8BC",
-  gold: "#C8860A", goldBg: "#FFFBE8",
-  blue: "#1A5C9E", blueBg: "#EEF4FF",
-  red: "#C0392B", redBg: "#FFF0EE",
-  purple: "#6B2EA8", purpleBg: "#F5EEFF",
-};
- 
-// NOTE: cart items come from useCartStore (see (home)/page.jsx and
-// product/[slug]/page.jsx "Add to Cart"). Addresses come from the real
-// GET/POST /addresses endpoints (backend/src/modules/addresses/) —
-// normalizeAddress() below maps the backend document shape to this page's
-// display shape.
-function normalizeAddress(a) {
-  return { id: a._id, label: a.label, name: a.fullName, phone: a.phone, line1: a.line1, line2: a.line2 || "", city: a.city, state: a.state, pin: a.pincode, isDefault: a.isDefault };
-}
- 
-const COUPONS = {
-  "DIWALI20": { type: "percent", value: 20, minOrder: 500, desc: "20% off (max ₹200)" },
-  "FIRST100": { type: "flat", value: 100, minOrder: 300, desc: "₹100 off on first order" },
-  "FREESHIP": { type: "shipping", value: 0, minOrder: 0, desc: "Free shipping" },
-};
- 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-function calcProductTotals(items, coupon, shippingFree) {
-  const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-  const mrpTotal = items.reduce((s, i) => s + i.mrp * i.qty, 0);
-  const savings = mrpTotal - subtotal;
-  const gst = items.reduce((s, i) => s + (i.price * i.qty * (i.gstPct ?? 5)) / 100, 0);
-  const shipping = subtotal >= 499 || shippingFree ? 0 : 49;
-  let discount = 0;
-  if (coupon) {
-    if (coupon.type === "percent") discount = Math.min(200, Math.round(subtotal * coupon.value / 100));
-    else if (coupon.type === "flat") discount = coupon.value;
-  }
-  const total = Math.round(subtotal + gst + shipping - discount);
-  return { subtotal, mrpTotal, savings, gst: Math.round(gst), shipping, discount, total };
-}
- 
-// ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
-function Stepper({ steps, current }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", padding: "20px 0" }}>
-      {steps.map((s, i) => (
-        <div key={i} style={{ display: "flex", alignItems: "center", flex: i < steps.length - 1 ? 1 : 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{
-              width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 12, fontWeight: 700, flexShrink: 0,
-              background: i < current ? C.green : i === current ? C.saffron : C.creamDark,
-              color: i <= current ? C.white : C.textLight,
-            }}>{i < current ? "✓" : i + 1}</div>
-            <span style={{ fontSize: 12, fontWeight: i === current ? 700 : 400, color: i === current ? C.saffron : i < current ? C.green : C.textLight, whiteSpace: "nowrap" }}>{s}</span>
-          </div>
-          {i < steps.length - 1 && <div style={{ flex: 1, height: 2, margin: "0 12px", background: i < current ? C.green : C.creamDark, borderRadius: 1 }} />}
-        </div>
-      ))}
-    </div>
-  );
-}
- 
-function SummaryRow({ label, value, bold, color, small }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: small ? 6 : 10, fontSize: small ? 12 : 13 }}>
-      <span style={{ color: C.textLight }}>{label}</span>
-      <span style={{ fontWeight: bold ? 700 : 500, color: color || C.text }}>{value}</span>
-    </div>
-  );
-}
- 
-function itemKey(item) { return `${item.productId}:${item.variantId || ""}`; }
+import { useCartStore } from "../../lib/cartStore";
+import { formatPrice } from "../../lib/format";
+import { calcCartTotals, cartItemKey } from "../../lib/pricing";
+import { BRAND, COLORS } from "../../lib/theme";
+import AddressStep, { formatAddress } from "../../components/checkout/AddressStep";
+import CartLineItem from "../../components/checkout/CartLineItem";
+import CheckoutSteps from "../../components/checkout/CheckoutSteps";
+import OrderSummary from "../../components/checkout/OrderSummary";
+import PaymentMethods from "../../components/checkout/PaymentMethods";
+import Icon from "../../components/ui/Icon";
 
-// ─── CART VIEW ────────────────────────────────────────────────────────────────
-function CartView({ productCart, onCheckout }) {
-  const setQty = useCartStore((s) => s.setQty);
-  const removeCartItem = useCartStore((s) => s.removeItem);
-  const [couponInput, setCouponInput] = useState("");
-  const [appliedCoupon, setAppliedCoupon] = useState(null);
-  const [couponMsg, setCouponMsg] = useState(null);
-  const [couponError, setCouponError] = useState(false);
- 
-  const applyCoupon = () => {
-    const c = COUPONS[couponInput.trim().toUpperCase()];
-    if (c) { setAppliedCoupon({ code: couponInput.toUpperCase(), ...c }); setCouponMsg(`✓ ${c.desc} applied!`); setCouponError(false); }
-    else { setCouponMsg("Invalid coupon code."); setCouponError(true); setAppliedCoupon(null); }
-  };
- 
-  const updateQty = (item, delta) => setQty(item.productId, item.variantId, Math.max(1, item.qty + delta));
-  const removeItem = (item) => removeCartItem(item.productId, item.variantId);
- 
-  const pt = calcProductTotals(productCart, appliedCoupon, appliedCoupon?.type === "shipping");
- 
+const STEPS = ["Cart", "Delivery address", "Payment"];
+const STEP_CART = 0;
+const STEP_ADDRESS = 1;
+const STEP_PAYMENT = 2;
+
+function Panel({ title, action, children }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 28 }}>
-      {/* Left */}
-      <div>
-        {productCart.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "60px 0", color: C.textLight }}>
-            <div style={{ fontSize: 48, marginBottom: 12 }}>🛒</div>
-            <div style={{ fontSize: 16, fontWeight: 600, color: C.text, marginBottom: 6 }}>Your cart is empty</div>
-            <div style={{ fontSize: 13 }}>Add puja items to get started</div>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {productCart.map(item => {
-              const disc = Math.round(((item.mrp - item.price) / item.mrp) * 100);
-              return (
-                <div key={itemKey(item)} style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: "18px 20px", display: "flex", gap: 16, alignItems: "flex-start" }}>
-                  <div style={{ width: 64, height: 64, background: C.cream, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30, flexShrink: 0 }}>{item.icon}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: C.saffron, fontWeight: 700, marginBottom: 2 }}>{item.category}</div>
-                    <div style={{ fontWeight: 700, fontSize: 15, color: C.text, marginBottom: 2 }}>{item.name}</div>
-                    {item.variantLabel && <div style={{ fontSize: 12, color: C.textLight, marginBottom: 10 }}>Variant: {item.variantLabel}</div>}
-                    <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                      {/* Qty stepper */}
-                      <div style={{ display: "flex", alignItems: "center", border: `1.5px solid ${C.border}`, borderRadius: 9, overflow: "hidden" }}>
-                        <button onClick={() => updateQty(item, -1)} style={{ width: 32, height: 32, border: "none", background: C.cream, cursor: "pointer", fontSize: 16, color: C.textMid, fontWeight: 700 }}>−</button>
-                        <span style={{ width: 32, textAlign: "center", fontSize: 14, fontWeight: 700, color: C.text }}>{item.qty}</span>
-                        <button onClick={() => updateQty(item, +1)} style={{ width: 32, height: 32, border: "none", background: C.cream, cursor: "pointer", fontSize: 16, color: C.textMid, fontWeight: 700 }}>+</button>
-                      </div>
-                      <button onClick={() => removeItem(item)} style={{ fontSize: 12, color: C.red, background: "none", border: "none", cursor: "pointer", fontWeight: 600 }}>✕ Remove</button>
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right", flexShrink: 0 }}>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>₹{(item.price * item.qty).toLocaleString()}</div>
-                    {disc > 0 && <div style={{ fontSize: 12, color: C.textLight, textDecoration: "line-through" }}>₹{(item.mrp * item.qty).toLocaleString()}</div>}
-                    {disc > 0 && <div style={{ fontSize: 11, color: C.green, fontWeight: 700 }}>{disc}% off</div>}
-                    <div style={{ fontSize: 10, color: C.textLight, marginTop: 4 }}>+{item.gstPct ?? 5}% GST</div>
-                  </div>
-                </div>
-              );
-            })}
- 
-            {/* Coupon */}
-            <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "16px 18px" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 10 }}>🏷 Apply Coupon</div>
-              <div style={{ display: "flex", gap: 10 }}>
-                <input value={couponInput} onChange={e => setCouponInput(e.target.value.toUpperCase())} placeholder="Enter coupon code" style={{ flex: 1, padding: "10px 14px", borderRadius: 9, border: `1.5px solid ${appliedCoupon ? C.green : C.border}`, fontSize: 13, color: C.text, background: C.cream, outline: "none", letterSpacing: 1, fontWeight: 600 }} />
-                <button onClick={applyCoupon} style={{ padding: "10px 18px", borderRadius: 9, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Apply</button>
-                {appliedCoupon && <button onClick={() => { setAppliedCoupon(null); setCouponMsg(null); setCouponInput(""); }} style={{ padding: "10px 14px", borderRadius: 9, background: C.redBg, color: C.red, border: "none", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Remove</button>}
-              </div>
-              {couponMsg && <div style={{ fontSize: 12, marginTop: 8, fontWeight: 600, color: couponError ? C.red : C.green }}>{couponMsg}</div>}
-              <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {Object.entries(COUPONS).map(([code, c]) => (
-                  <span key={code} onClick={() => { setCouponInput(code); }} style={{ fontSize: 11, color: C.gold, background: C.goldBg, padding: "3px 10px", borderRadius: 999, cursor: "pointer", fontWeight: 700 }}>{code}</span>
-                ))}
-              </div>
-            </div>
- 
-            {/* Delivery note */}
-            <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 12, padding: "12px 16px", display: "flex", gap: 10, alignItems: "center" }}>
-              <span style={{ fontSize: 20 }}>🚚</span>
-              <div style={{ fontSize: 13, color: C.green, fontWeight: 600 }}>
-                {pt.shipping === 0 ? "Free delivery on this order!" : `Add ₹${499 - pt.subtotal} more for free delivery`}
-              </div>
-            </div>
-          </div>
-        )}
+    <section className="flex flex-col gap-4 rounded-md border border-line p-4 md:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="heading-display text-[22px] md:text-2xl">{title}</h2>
+        {action}
       </div>
- 
-      {/* Right — Summary */}
-      <div>
-        <div style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: "24px", position: "sticky", top: 20 }}>
-          <h3 style={{ fontFamily: "'Georgia',serif", fontSize: 18, color: C.text, margin: "0 0 20px" }}>Order Summary</h3>
- 
-          {productCart.length > 0 ? (
-            <>
-              <SummaryRow label="MRP Total" value={`₹${pt.mrpTotal.toLocaleString()}`} />
-              <SummaryRow label="Product Discount" value={`-₹${pt.savings.toLocaleString()}`} color={C.green} />
-              <SummaryRow label="Subtotal" value={`₹${pt.subtotal.toLocaleString()}`} bold />
-              <SummaryRow label={`GST (avg ${Math.round(pt.gst / pt.subtotal * 100)}%)`} value={`₹${pt.gst}`} />
-              <SummaryRow label="Delivery" value={pt.shipping === 0 ? "FREE" : `₹${pt.shipping}`} color={pt.shipping === 0 ? C.green : C.text} />
-              {appliedCoupon && <SummaryRow label={`Coupon (${appliedCoupon.code})`} value={`-₹${pt.discount}`} color={C.green} />}
-              <div style={{ borderTop: `1.5px dashed ${C.border}`, margin: "14px 0", paddingTop: 14 }}>
-                <SummaryRow label="Total Payable" value={`₹${pt.total.toLocaleString()}`} bold color={C.saffron} />
-              </div>
-              {pt.savings > 0 && <div style={{ background: C.greenBg, borderRadius: 9, padding: "10px 14px", fontSize: 12, color: C.green, fontWeight: 600, marginBottom: 16 }}>🎉 You save ₹{(pt.savings + pt.discount).toLocaleString()} on this order</div>}
-              <button onClick={onCheckout} style={{ width: "100%", padding: "14px", borderRadius: 12, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
-                Proceed to Checkout →
-              </button>
-            </>
-          ) : (
-            <div style={{ textAlign: "center", color: C.textLight, padding: "20px 0", fontSize: 13 }}>Nothing to checkout yet.</div>
-          )}
- 
-          <div style={{ marginTop: 16, display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
-            {["UPI","Razorpay","Cards","COD","Wallets"].map(p => (
-              <span key={p} style={{ fontSize: 10, color: C.textLight, background: C.cream, padding: "3px 8px", borderRadius: 6, fontWeight: 600 }}>{p}</span>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
+      {children}
+    </section>
   );
 }
- 
-// ─── ADDRESS STEP ─────────────────────────────────────────────────────────────
-function AddressStep({ addresses, addressesLoading, addressesError, selectedAddr, setSelectedAddr, onAddressSaved }) {
-  const [showNew, setShowNew] = useState(false);
-  const [newAddr, setNewAddr] = useState({ name: "", phone: "", line1: "", line2: "", city: "", state: "", pin: "" });
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
 
-  const saveAddress = async () => {
-    setSaveError("");
-    const phoneDigits = newAddr.phone.replace(/\D/g, "").replace(/^91/, "");
-    const phoneE164 = /^[6-9]\d{9}$/.test(phoneDigits) ? `+91${phoneDigits}` : null;
-    if (!newAddr.name || !phoneE164 || !newAddr.line1 || !newAddr.city || !newAddr.state || !/^\d{6}$/.test(newAddr.pin)) {
-      setSaveError("Please fill in a valid name, 10-digit phone, address line, city, state and 6-digit pincode.");
+// Opens the Razorpay window (script loaded in app/layout.tsx) and resolves
+// with Razorpay's response once the customer has paid.
+function openRazorpay(pay, customer) {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !window.Razorpay) {
+      reject(new Error("The payment window could not be loaded. Please refresh the page and try again."));
       return;
     }
-    setSaving(true);
-    try {
-      const { ok, body } = await apiFetch("/addresses", {
-        method: "POST",
-        body: JSON.stringify({
-          label: "Home", fullName: newAddr.name, phone: phoneE164,
-          line1: newAddr.line1, line2: newAddr.line2 || undefined,
-          city: newAddr.city, state: newAddr.state, pincode: newAddr.pin,
-        }),
-      });
-      if (!ok) throw new Error(body.message || "Couldn't save address.");
-      onAddressSaved(body.data.address);
-      setShowNew(false);
-      setNewAddr({ name: "", phone: "", line1: "", line2: "", city: "", state: "", pin: "" });
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Something went wrong.");
-    } finally {
-      setSaving(false);
-    }
-  };
+    const rzp = new window.Razorpay({
+      key: pay.keyId,
+      amount: pay.amount,
+      currency: pay.currency,
+      order_id: pay.razorpayOrderId,
+      name: BRAND.name,
+      prefill: { name: customer?.name, contact: customer?.phone },
+      theme: { color: COLORS.navy },
+      handler: (response) => resolve(response),
+      modal: { ondismiss: () => reject(new Error("PAYMENT_DISMISSED")) },
+    });
+    rzp.open();
+  });
+}
 
+function OrderPlaced({ order }) {
+  const paidOnline = order.paymentMethod !== "cod";
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 28 }}>
-      <div>
-        <h2 style={{ fontFamily: "'Georgia',serif", fontSize: 22, color: C.text, margin: "0 0 6px" }}>Delivery Address</h2>
-        <p style={{ color: C.textLight, fontSize: 13, margin: "0 0 20px" }}>Where should we deliver your order?</p>
-
-        {addressesLoading ? (
-          <div style={{ padding: "20px 0", color: C.textLight, fontSize: 13 }}>Loading your addresses…</div>
-        ) : addressesError ? (
-          <div style={{ background: C.redBg, color: C.red, fontSize: 12, fontWeight: 600, padding: "10px 14px", borderRadius: 10, marginBottom: 16 }}>{addressesError}</div>
-        ) : addresses.length === 0 ? (
-          <div style={{ background: C.goldBg, color: C.textMid, fontSize: 12, padding: "10px 14px", borderRadius: 10, marginBottom: 16 }}>
-            You don't have any saved addresses yet — add one below to continue.
+    <div className="site-container flex justify-center py-12 md:py-20">
+      <div className="flex w-full max-w-[520px] flex-col items-center gap-5 rounded-md border border-line border-t-[3px] border-t-gold p-6 text-center md:p-10">
+        <span className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-navy text-gold">
+          <Icon name="check" size={28} />
+        </span>
+        <h1 className="heading-display text-[28px] md:text-[34px]">Order placed</h1>
+        <p className="text-slate">Thank you. Your order has been received.</p>
+        <dl className="flex w-full flex-col gap-2 rounded bg-offwhite p-4 text-sm">
+          <div className="flex justify-between gap-3">
+            <dt className="text-slate">Order ID</dt>
+            <dd className="font-semibold">{order.orderId}</dd>
           </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
-            {addresses.map(a => (
-              <div key={a.id} onClick={() => setSelectedAddr(a)} style={{ background: C.white, borderRadius: 14, border: `2px solid ${selectedAddr?.id === a.id ? C.saffron : C.border}`, padding: "16px 18px", cursor: "pointer", boxShadow: selectedAddr?.id === a.id ? `0 0 0 3px ${C.saffron}18` : "none", transition: "all 0.15s" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <div style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${selectedAddr?.id === a.id ? C.saffron : C.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      {selectedAddr?.id === a.id && <div style={{ width: 10, height: 10, borderRadius: "50%", background: C.saffron }} />}
-                    </div>
-                    <span style={{ fontSize: 11, fontWeight: 700, color: C.saffron, background: C.saffronBg, padding: "2px 8px", borderRadius: 999 }}>{a.label}</span>
-                    {a.isDefault && <span style={{ fontSize: 11, fontWeight: 700, color: C.green, background: C.greenBg, padding: "2px 8px", borderRadius: 999 }}>Default</span>}
-                  </div>
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 2 }}>{a.name}</div>
-                <div style={{ fontSize: 13, color: C.textMid, lineHeight: 1.6 }}>{a.line1}{a.line2 ? `, ${a.line2}` : ""}, {a.city}, {a.state} — {a.pin}</div>
-                <div style={{ fontSize: 12, color: C.textLight, marginTop: 2 }}>📞 {a.phone}</div>
-              </div>
-            ))}
+          <div className="flex justify-between gap-3">
+            <dt className="text-slate">{paidOnline ? "Amount paid" : "Amount to pay on delivery"}</dt>
+            <dd className="font-semibold">{formatPrice(order.total)}</dd>
           </div>
-        )}
-
-        <button onClick={() => setShowNew(v => !v)} style={{ padding: "11px 18px", borderRadius: 10, border: `1.5px dashed ${C.saffron}`, background: C.saffronBg, color: C.saffron, fontWeight: 600, fontSize: 13, cursor: "pointer", width: "100%" }}>
-          {showNew ? "✕ Cancel" : "+ Add New Address"}
-        </button>
-
-        {showNew && (
-          <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "20px", marginTop: 14 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-              {[["Full Name","name","text"],["Phone (10 digits)","phone","tel"],["Address Line 1","line1","text"],["Address Line 2","line2","text"],["City","city","text"],["State","state","text"],["Pincode","pin","text"]].map(([label, key, type]) => (
-                <div key={key} style={{ gridColumn: key === "line1" || key === "line2" ? "1 / -1" : "auto" }}>
-                  <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textMid, marginBottom: 5 }}>{label}</label>
-                  <input type={type} value={newAddr[key]} onChange={e => setNewAddr(v => ({...v, [key]: e.target.value}))} style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.cream, outline: "none", boxSizing: "border-box" }} />
-                </div>
-              ))}
+          {order.discount > 0 && (
+            <div className="flex justify-between gap-3">
+              <dt className="text-slate">Coupon discount</dt>
+              <dd className="font-semibold">− {formatPrice(order.discount)}</dd>
             </div>
-            {saveError && <div style={{ color: C.red, fontSize: 12, fontWeight: 600, marginTop: 10 }}>{saveError}</div>}
-            <button onClick={saveAddress} disabled={saving} style={{ marginTop: 14, padding: "10px 20px", borderRadius: 9, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 13, cursor: saving ? "default" : "pointer", opacity: saving ? 0.7 : 1 }}>
-              {saving ? "Saving…" : "Save & Use This Address"}
-            </button>
-          </div>
-        )}
-      </div>
- 
-      {/* Delivery options */}
-      <div>
-        <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "20px" }}>
-          <h3 style={{ fontFamily: "'Georgia',serif", fontSize: 16, color: C.text, margin: "0 0 14px" }}>Delivery Options</h3>
-          {[
-            { id: "std", label: "Standard Delivery", sub: "Delivered in 3–5 days", price: "FREE", badge: null },
-            { id: "exp", label: "Express Delivery", sub: "Delivered in 1–2 days", price: "₹79", badge: "Fast" },
-            { id: "same", label: "Same Day Delivery", sub: "Before 8 PM today", price: "₹149", badge: "Today" },
-          ].map((opt, i) => (
-            <div key={opt.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${i === 0 ? C.saffron : C.border}`, background: i === 0 ? C.saffronBg : C.white, marginBottom: 10, cursor: "pointer" }}>
-              <div style={{ width: 18, height: 18, borderRadius: "50%", border: `2px solid ${i === 0 ? C.saffron : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                {i === 0 && <div style={{ width: 9, height: 9, borderRadius: "50%", background: C.saffron }} />}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: C.text, display: "flex", gap: 8, alignItems: "center" }}>
-                  {opt.label}
-                  {opt.badge && <span style={{ fontSize: 10, color: C.saffron, background: C.saffronBg, padding: "2px 7px", borderRadius: 999, fontWeight: 700 }}>{opt.badge}</span>}
-                </div>
-                <div style={{ fontSize: 11, color: C.textLight }}>{opt.sub}</div>
-              </div>
-              <span style={{ fontSize: 13, fontWeight: 700, color: i === 0 ? C.green : C.text }}>{opt.price}</span>
-            </div>
-          ))}
+          )}
+        </dl>
+        <div className="flex w-full flex-col gap-3 sm:flex-row">
+          <Link href={`/delivery?orderId=${encodeURIComponent(order.orderId)}`} className="btn btn-gold flex-1">
+            Track order
+          </Link>
+          <Link href="/shop" className="btn btn-outline flex-1">
+            Continue shopping
+          </Link>
         </div>
       </div>
     </div>
   );
 }
- 
-// ─── PAYMENT STEP ─────────────────────────────────────────────────────────────
-function PaymentStep({ productCart, appliedCoupon, method, setMethod }) {
-  const [upiId, setUpiId] = useState("");
-  const [codConfirm, setCodConfirm] = useState(false);
- 
-  const pt = calcProductTotals(productCart, appliedCoupon, appliedCoupon?.type === "shipping");
-  const total = pt.total;
- 
-  const METHODS = [
-    { id: "upi", label: "UPI", icon: "📱", sub: "PhonePe · GPay · Paytm · BHIM" },
-    { id: "card", label: "Credit / Debit Card", icon: "💳", sub: "All major cards accepted" },
-    { id: "netbanking", label: "Net Banking", icon: "🏦", sub: "All major banks supported" },
-    { id: "wallet", label: "Wallets", icon: "👛", sub: "Paytm · Amazon Pay · Mobikwik" },
-    { id: "cod", label: "Cash on Delivery", icon: "💵", sub: "Pay when you receive (up to ₹3,000)" },
-  ];
- 
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 28 }}>
-      <div>
-        <h2 style={{ fontFamily: "'Georgia',serif", fontSize: 22, color: C.text, margin: "0 0 6px" }}>Payment Method</h2>
-        <p style={{ color: C.textLight, fontSize: 13, margin: "0 0 20px" }}>All transactions are secured and encrypted.</p>
- 
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {METHODS.map(m => (
-            <div key={m.id}>
-              <div onClick={() => setMethod(m.id)} style={{ background: C.white, borderRadius: 14, border: `2px solid ${method === m.id ? C.saffron : C.border}`, padding: "16px 18px", cursor: "pointer", boxShadow: method === m.id ? `0 0 0 3px ${C.saffron}18` : "none", transition: "all 0.15s" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <div style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${method === m.id ? C.saffron : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    {method === m.id && <div style={{ width: 10, height: 10, borderRadius: "50%", background: C.saffron }} />}
-                  </div>
-                  <span style={{ fontSize: 20 }}>{m.icon}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{m.label}</div>
-                    <div style={{ fontSize: 11, color: C.textLight }}>{m.sub}</div>
-                  </div>
-                  {m.id === "razorpay" && <span style={{ fontSize: 10, color: C.blue, background: C.blueBg, padding: "2px 8px", borderRadius: 999, fontWeight: 700 }}>Recommended</span>}
-                </div>
-              </div>
- 
-              {/* Inline form per method */}
-              {method === m.id && m.id === "upi" && (
-                <div style={{ background: C.saffronBg, borderRadius: "0 0 12px 12px", padding: "14px 18px", marginTop: -6, border: `1.5px solid ${C.saffron}`, borderTop: "none" }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: C.textMid, marginBottom: 8 }}>Enter UPI ID</div>
-                  <div style={{ display: "flex", gap: 10 }}>
-                    <input value={upiId} onChange={e => setUpiId(e.target.value)} placeholder="yourname@upi" style={{ flex: 1, padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }} />
-                    <button style={{ padding: "9px 16px", borderRadius: 8, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Verify</button>
-                  </div>
-                  <div style={{ fontSize: 11, color: C.textLight, marginTop: 6 }}>Or scan QR code at payment screen</div>
-                </div>
-              )}
-              {method === m.id && m.id === "card" && (
-                <div style={{ background: C.saffronBg, borderRadius: "0 0 12px 12px", padding: "16px 18px", marginTop: -6, border: `1.5px solid ${C.saffron}`, borderTop: "none" }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    <input placeholder="Card Number" style={{ padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }} />
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                      <input placeholder="MM / YY" style={{ padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }} />
-                      <input placeholder="CVV" type="password" maxLength={4} style={{ padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }} />
-                      <input placeholder="Name on card" style={{ padding: "9px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }} />
-                    </div>
-                  </div>
-                </div>
-              )}
-              {method === m.id && m.id === "netbanking" && (
-                <div style={{ background: C.saffronBg, borderRadius: "0 0 12px 12px", padding: "14px 18px", marginTop: -6, border: `1.5px solid ${C.saffron}`, borderTop: "none" }}>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {["SBI","HDFC","ICICI","Axis","Kotak","PNB"].map(b => (
-                      <button key={b} style={{ padding: "7px 14px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.white, color: C.textMid, fontWeight: 600, fontSize: 12, cursor: "pointer" }}>{b}</button>
-                    ))}
-                    <button style={{ padding: "7px 14px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.white, color: C.blue, fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Other Banks</button>
-                  </div>
-                </div>
-              )}
-              {method === m.id && m.id === "wallet" && (
-                <div style={{ background: C.saffronBg, borderRadius: "0 0 12px 12px", padding: "14px 18px", marginTop: -6, border: `1.5px solid ${C.saffron}`, borderTop: "none" }}>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {["Paytm","Amazon Pay","Mobikwik","Freecharge"].map(w => (
-                      <button key={w} style={{ padding: "7px 14px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.white, color: C.textMid, fontWeight: 600, fontSize: 12, cursor: "pointer" }}>{w}</button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {method === m.id && m.id === "cod" && (
-                <div style={{ background: C.goldBg, borderRadius: "0 0 12px 12px", padding: "14px 18px", marginTop: -6, border: `1.5px solid ${C.marigold}`, borderTop: "none" }}>
-                  <label style={{ display: "flex", gap: 10, cursor: "pointer", fontSize: 13, color: C.textMid, fontWeight: 500 }}>
-                    <input type="checkbox" checked={codConfirm} onChange={e => setCodConfirm(e.target.checked)} style={{ accentColor: C.saffron }} />
-                    I understand I'll pay ₹{total.toLocaleString()} in cash to the delivery person.
-                  </label>
-                  <div style={{ fontSize: 11, color: C.textLight, marginTop: 6 }}>COD available for orders up to ₹3,000. A ₹25 COD fee applies.</div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
- 
-        {/* Razorpay note */}
-        <div style={{ marginTop: 16, background: C.blueBg, border: `1px solid ${C.blue}22`, borderRadius: 12, padding: "12px 16px", display: "flex", gap: 10, alignItems: "center" }}>
-          <span style={{ fontSize: 18 }}>🔒</span>
-          <div style={{ fontSize: 12, color: C.blue }}>
-            <strong>Secured by Razorpay.</strong> Your payment info is encrypted with 256-bit SSL. We never store card details.
-          </div>
-        </div>
-      </div>
- 
-      {/* Order summary sidebar */}
-      <div>
-        <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "20px", position: "sticky", top: 20 }}>
-          <h3 style={{ fontFamily: "'Georgia',serif", fontSize: 16, color: C.text, margin: "0 0 16px" }}>Order Total</h3>
-          <SummaryRow label="Subtotal" value={`₹${pt.subtotal.toLocaleString()}`} />
-          <SummaryRow label="GST" value={`₹${pt.gst}`} />
-          <SummaryRow label="Delivery" value={pt.shipping === 0 ? "FREE" : `₹${pt.shipping}`} color={pt.shipping === 0 ? C.green : C.text} />
-          {appliedCoupon && <SummaryRow label={`Coupon (${appliedCoupon.code})`} value={`-₹${pt.discount}`} color={C.green} />}
-          <div style={{ borderTop: `1.5px dashed ${C.border}`, margin: "12px 0 12px" }} />
-          <SummaryRow label="Total" value={`₹${pt.total.toLocaleString()}`} bold color={C.saffron} />
-        </div>
-      </div>
-    </div>
-  );
-}
- 
-// ─── CONFIRM STEP ─────────────────────────────────────────────────────────────
-function ConfirmStep({ productCart, selectedAddr, appliedCoupon, onPlace, placing }) {
-  const pt = calcProductTotals(productCart, appliedCoupon, appliedCoupon?.type === "shipping");
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 28 }}>
-      <div>
-        <h2 style={{ fontFamily: "'Georgia',serif", fontSize: 22, color: C.text, margin: "0 0 6px" }}>Review Your Order</h2>
-        <p style={{ color: C.textLight, fontSize: 13, margin: "0 0 20px" }}>Double-check everything before placing.</p>
- 
-        {/* Items */}
-        <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "20px", marginBottom: 16 }}>
-          <div style={{ fontWeight: 700, fontSize: 14, color: C.text, marginBottom: 14, paddingBottom: 10, borderBottom: `1px solid ${C.creamDark}` }}>📦 Products</div>
-          {productCart.map(i => (
-            <div key={itemKey(i)} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 10, alignItems: "center" }}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <span style={{ fontSize: 18 }}>{i.icon}</span>
-                <div>
-                  <div style={{ fontWeight: 600, color: C.text }}>{i.name}</div>
-                  <div style={{ fontSize: 11, color: C.textLight }}>Qty: {i.qty} × ₹{i.price}</div>
-                </div>
-              </div>
-              <span style={{ fontWeight: 700, color: C.text }}>₹{(i.price * i.qty).toLocaleString()}</span>
-            </div>
-          ))}
-        </div>
- 
-        {/* Address */}
-        {selectedAddr && (
-          <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "16px 20px", marginBottom: 16 }}>
-            <div style={{ fontWeight: 700, fontSize: 14, color: C.text, marginBottom: 10 }}>📍 Delivery Address</div>
-            <div style={{ fontSize: 13, color: C.textMid }}><strong>{selectedAddr.name}</strong></div>
-            <div style={{ fontSize: 13, color: C.textMid }}>{selectedAddr.line1}, {selectedAddr.line2}, {selectedAddr.city}, {selectedAddr.state} — {selectedAddr.pin}</div>
-            <div style={{ fontSize: 12, color: C.textLight, marginTop: 4 }}>📞 {selectedAddr.phone}</div>
-          </div>
-        )}
-      </div>
- 
-      {/* Final summary + CTA */}
-      <div>
-        <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "24px", position: "sticky", top: 20 }}>
-          <h3 style={{ fontFamily: "'Georgia',serif", fontSize: 16, color: C.text, margin: "0 0 16px" }}>Payment Summary</h3>
-          <SummaryRow label="Subtotal" value={`₹${pt.subtotal}`} />
-          <SummaryRow label="GST" value={`₹${pt.gst}`} />
-          <SummaryRow label="Delivery" value={pt.shipping === 0 ? "FREE" : `₹${pt.shipping}`} color={pt.shipping === 0 ? C.green : C.text} />
-          {appliedCoupon && <SummaryRow label={`Coupon`} value={`-₹${pt.discount}`} color={C.green} />}
-          <div style={{ borderTop: `1.5px dashed ${C.border}`, margin: "12px 0" }} />
-          <SummaryRow label="You Pay" value={`₹${pt.total.toLocaleString()}`} bold color={C.saffron} />
-          <button onClick={onPlace} disabled={placing} style={{ width: "100%", padding: "14px", borderRadius: 12, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 15, cursor: placing ? "default" : "pointer", marginTop: 16, opacity: placing ? 0.7 : 1 }}>
-            {placing ? "Placing Order…" : `🙏 Place Order · ₹${pt.total.toLocaleString()}`}
-          </button>
-          <p style={{ fontSize: 11, color: C.textLight, textAlign: "center", marginTop: 10, lineHeight: 1.6 }}>
-            By placing order you agree to our Terms & Conditions. Powered by Razorpay.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
- 
-// ─── SUCCESS SCREEN ───────────────────────────────────────────────────────────
-function SuccessScreen({ onReset, orderId }) {
-  return (
-    <div style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: C.white, borderRadius: 24, padding: "56px 48px", maxWidth: 480, width: "100%", textAlign: "center", border: `1px solid ${C.border}` }}>
-        <div style={{ fontSize: 72, marginBottom: 16 }}>📦</div>
-        <div style={{ fontFamily: "'Georgia',serif", fontSize: 28, fontWeight: 700, color: C.text, marginBottom: 10 }}>
-          Order Placed!
-        </div>
-        <div style={{ fontSize: 14, color: C.textMid, lineHeight: 1.7, marginBottom: 28 }}>
-          Your puja samagri is on its way. You'll receive updates via SMS and WhatsApp.
-        </div>
-        <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 14, padding: "18px 20px", marginBottom: 28 }}>
-          <div style={{ fontSize: 13, color: C.green, fontWeight: 700, marginBottom: 6 }}>✓ Order ID: {orderId}</div>
-          <div style={{ fontSize: 12, color: C.textLight }}>Confirmation sent to your registered mobile & email</div>
-        </div>
-        <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-          <Link href="/delivery" style={{ padding: "11px 22px", borderRadius: 10, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 14, cursor: "pointer", textDecoration: "none" }}>Track Order</Link>
-          <button onClick={onReset} style={{ padding: "11px 22px", borderRadius: 10, border: `1.5px solid ${C.border}`, background: C.white, color: C.textMid, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>Continue Shopping</button>
-        </div>
-      </div>
-    </div>
-  );
-}
- 
-// ─── ROOT ─────────────────────────────────────────────────────────────────────
-const CHECKOUT_STEPS = ["Cart", "Address", "Payment", "Confirm"];
- 
-export default function CartCheckout() {
+
+export default function CartPage() {
   const router = useRouter();
-  const productCart = useCartStore((s) => s.items);
+  const items = useCartStore((s) => s.items);
   const clearCart = useCartStore((s) => s.clear);
-  const [step, setStep] = useState(0);             // 0=cart 1=address 2=payment 3=confirm
-  const [addresses, setAddresses] = useState([]);
-  const [addressesLoading, setAddressesLoading] = useState(true);
-  const [addressesError, setAddressesError] = useState("");
-  const [selectedAddr, setSelectedAddr] = useState(null);
-  const [appliedCoupon, setAppliedCoupon] = useState(null);
-  const [method, setMethod] = useState("upi");
-  const [placed, setPlaced] = useState(false);
-  const [placedOrderId, setPlacedOrderId] = useState("");
-  const [placing, setPlacing] = useState(false);
-  const [checkoutError, setCheckoutError] = useState("");
 
+  // The cart lives in localStorage, so wait for mount before rendering it.
+  const [mounted, setMounted] = useState(false);
+  const [loggedIn, setLoggedIn] = useState(false);
   useEffect(() => {
-    if (step !== 1 || !isLoggedIn()) return;
-    let cancelled = false;
-    setAddressesLoading(true);
-    setAddressesError("");
-    apiFetch("/addresses")
-      .then(({ ok, body }) => {
-        if (cancelled) return;
-        if (!ok) { setAddressesError(body.message || "Couldn't load addresses."); return; }
-        const list = (body.data.addresses || []).map(normalizeAddress);
-        setAddresses(list);
-        setSelectedAddr(prev => prev || list.find(a => a.isDefault) || list[0] || null);
-      })
-      .catch(() => { if (!cancelled) setAddressesError("Couldn't reach the server."); })
-      .finally(() => { if (!cancelled) setAddressesLoading(false); });
-    return () => { cancelled = true; };
-  }, [step]);
+    setMounted(true);
+    setLoggedIn(isLoggedIn());
+  }, []);
 
-  const onAddressSaved = (address) => {
-    const normalized = normalizeAddress(address);
-    setAddresses(prev => [normalized, ...prev.filter(a => a.id !== normalized.id)]);
-    setSelectedAddr(normalized);
+  const [step, setStep] = useState(STEP_CART);
+  const [address, setAddress] = useState(null);
+  const [method, setMethod] = useState("razorpay");
+  const [couponCode, setCouponCode] = useState("");
+  const [placing, setPlacing] = useState(false);
+  const [error, setError] = useState("");
+  const [placedOrder, setPlacedOrder] = useState(null);
+
+  // An order that was created but not yet paid (the customer closed the
+  // Razorpay window, or verification failed). Retrying reuses it instead of
+  // creating a second order — as long as nothing about the order changed.
+  const [pendingOrder, setPendingOrder] = useState(null);
+
+  const totals = calcCartTotals(items);
+  const orderSignature = JSON.stringify({
+    items: items.map((i) => [cartItemKey(i), i.qty]),
+    address: address?.id,
+    couponCode,
+  });
+
+  // If the cart is emptied part-way through checkout, go back to the cart.
+  useEffect(() => {
+    if (mounted && !placedOrder && items.length === 0 && step !== STEP_CART) setStep(STEP_CART);
+  }, [mounted, placedOrder, items.length, step]);
+
+  const goTo = (next) => {
+    setError("");
+    setStep(next);
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const startCheckout = () => setStep(1);
-  const reset = () => { setStep(0); setPlaced(false); setCheckoutError(""); };
+  const startCheckout = () => {
+    if (!isLoggedIn()) {
+      // The cart is saved in this browser, so it is still here after login.
+      router.push("/login?next=/cart");
+      return;
+    }
+    goTo(STEP_ADDRESS);
+  };
 
-  // Real checkout: POST /orders (using a real Address _id from GET
-  // /addresses), then for online methods POST /payments/create-order →
-  // Razorpay Checkout widget → POST /payments/verify.
   const placeOrder = async () => {
-    if (!isLoggedIn()) { router.push("/login"); return; }
-    if (!selectedAddr) { setCheckoutError("Please add a delivery address first."); return; }
+    if (!isLoggedIn()) {
+      router.push("/login?next=/cart");
+      return;
+    }
+    if (!address) {
+      setError("Please choose a delivery address.");
+      return;
+    }
+
     setPlacing(true);
-    setCheckoutError("");
+    setError("");
 
     try {
-      const orderRes = await apiFetch("/orders", {
-        method: "POST",
-        body: JSON.stringify({
-          items: productCart.map((i) => ({
-            productId: i.productId,
-            ...(i.variantId ? { variantId: i.variantId } : {}),
-            qty: i.qty,
-          })),
-          addressId: selectedAddr.id,
-          paymentMethod: method,
-          ...(appliedCoupon ? { couponCode: appliedCoupon.code } : {}),
-        }),
-      });
-      if (!orderRes.ok) throw new Error(orderRes.body.message || "Couldn't place your order.");
-      const order = orderRes.body.data.order;
+      // 1. Create the order — or reuse the unpaid one from a previous try.
+      let order = pendingOrder?.signature === orderSignature ? pendingOrder.order : null;
 
+      if (!order) {
+        const res = await apiFetch("/orders", {
+          method: "POST",
+          body: JSON.stringify({
+            items: items.map((i) => ({
+              productId: i.productId,
+              ...(i.variantId ? { variantId: i.variantId } : {}),
+              qty: i.qty,
+            })),
+            addressId: address.id,
+            paymentMethod: method,
+            ...(couponCode ? { couponCode } : {}),
+          }),
+        });
+        if (!res.ok) throw new Error(res.body?.message || "We couldn't place your order. Please try again.");
+        order = res.body.data.order;
+      }
+
+      // 2a. Cash on delivery: nothing more to do.
       if (method === "cod") {
         clearCart();
-        setPlacedOrderId(order.orderId);
-        setPlaced(true);
+        setPendingOrder(null);
+        setPlacedOrder({ ...order, paymentMethod: "cod" });
         return;
       }
 
-      // Online payment — create the Razorpay order, then open the checkout
-      // widget (loaded via <script> in layout.tsx).
+      // 2b. Online: keep the unpaid order so a retry does not duplicate it.
+      setPendingOrder({ order, signature: orderSignature });
+
       const payRes = await apiFetch("/payments/create-order", {
         method: "POST",
         body: JSON.stringify({ orderId: order.orderId }),
       });
-      if (!payRes.ok) throw new Error(payRes.body.message || "Couldn't start payment.");
-      const pay = payRes.body.data;
+      if (!payRes.ok) throw new Error(payRes.body?.message || "We couldn't start the payment. Please try again.");
 
-      if (typeof window === "undefined" || !window.Razorpay) {
-        throw new Error("Payment widget failed to load. Please refresh and try again.");
+      let response;
+      try {
+        response = await openRazorpay(payRes.body.data, address);
+      } catch (err) {
+        if (err instanceof Error && err.message === "PAYMENT_DISMISSED") {
+          throw new Error(`Payment was not completed. Your order ${order.orderId} is saved — choose "Pay now" to try again.`);
+        }
+        throw err;
       }
 
-      await new Promise((resolve, reject) => {
-        const rzp = new window.Razorpay({
-          key: pay.keyId,
-          amount: pay.amount,
-          currency: pay.currency,
-          order_id: pay.razorpayOrderId,
-          name: "nityasamagri",
-          handler: async (response) => {
-            try {
-              const verifyRes = await apiFetch("/payments/verify", {
-                method: "POST",
-                body: JSON.stringify({
-                  razorpayOrderId: response.razorpay_order_id,
-                  razorpayPaymentId: response.razorpay_payment_id,
-                  razorpaySignature: response.razorpay_signature,
-                  orderId: order.orderId,
-                }),
-              });
-              if (!verifyRes.ok) throw new Error(verifyRes.body.message || "Payment verification failed.");
-              resolve();
-            } catch (err) {
-              reject(err);
-            }
-          },
-          modal: { ondismiss: () => reject(new Error("Payment cancelled.")) },
-        });
-        rzp.open();
+      const verifyRes = await apiFetch("/payments/verify", {
+        method: "POST",
+        body: JSON.stringify({
+          razorpayOrderId: response.razorpay_order_id,
+          razorpayPaymentId: response.razorpay_payment_id,
+          razorpaySignature: response.razorpay_signature,
+          orderId: order.orderId,
+        }),
       });
+      if (!verifyRes.ok) {
+        throw new Error(
+          verifyRes.body?.message ||
+            `We couldn't confirm your payment for order ${order.orderId}. If money was deducted, please contact ${BRAND.email}.`
+        );
+      }
 
       clearCart();
-      setPlacedOrderId(order.orderId);
-      setPlaced(true);
+      setPendingOrder(null);
+      setPlacedOrder({ ...order, paymentMethod: method });
     } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
     } finally {
       setPlacing(false);
     }
   };
 
-  return (
-    <div style={{ minHeight: "100vh", background: C.cream, fontFamily: "'Segoe UI','Helvetica Neue',sans-serif" }}>
-      {/* Navbar */}
-      <nav style={{ background: C.white, borderBottom: `1px solid ${C.border}`, padding: "0 24px", position: "sticky", top: 0, zIndex: 50 }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto", height: 60, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={reset}>
-            <span style={{ fontSize: 20 }}>🪔</span>
-            <span style={{ fontFamily: "'Georgia',serif", fontWeight: 700, fontSize: 16, color: C.saffron }}>nityasamagri</span>
-          </div>
-          <div style={{ fontSize: 13, color: C.textLight }}>
-            🔒 Secured Checkout &nbsp;·&nbsp; Powered by Razorpay
-          </div>
-        </div>
-      </nav>
- 
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "28px 24px" }}>
-        {/* Stepper (only during checkout) */}
-        {step > 0 && !placed && (
-          <div style={{ background: C.white, borderRadius: 14, border: `1px solid ${C.border}`, padding: "4px 24px", marginBottom: 28 }}>
-            <Stepper steps={CHECKOUT_STEPS} current={step} />
-          </div>
-        )}
- 
-        {/* Back button */}
-        {step > 0 && !placed && (
-          <button onClick={() => step === 1 ? reset() : setStep(s => s - 1)} style={{ marginBottom: 20, padding: "8px 16px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.white, color: C.textMid, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
-            ← Back
-          </button>
-        )}
- 
-        {/* Views */}
-        {checkoutError && (
-          <div style={{ background: C.redBg, color: C.red, fontSize: 13, fontWeight: 600, padding: "12px 16px", borderRadius: 10, marginBottom: 16 }}>
-            {checkoutError}
-          </div>
-        )}
-        {placed ? (
-          <SuccessScreen onReset={reset} orderId={placedOrderId} />
-        ) : step === 0 ? (
-          <CartView productCart={productCart} onCheckout={startCheckout} />
-        ) : step === 1 ? (
-          <AddressStep addresses={addresses} addressesLoading={addressesLoading} addressesError={addressesError} selectedAddr={selectedAddr} setSelectedAddr={setSelectedAddr} onAddressSaved={onAddressSaved} />
-        ) : step === 2 ? (
-          <PaymentStep productCart={productCart} appliedCoupon={appliedCoupon} method={method} setMethod={setMethod} />
-        ) : step === 3 ? (
-          <ConfirmStep productCart={productCart} selectedAddr={selectedAddr} appliedCoupon={appliedCoupon} onPlace={placeOrder} placing={placing} />
-        ) : null}
- 
-        {/* Next button */}
-        {step > 0 && step < 3 && !placed && (
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 28 }}>
-            <button onClick={() => setStep(s => s + 1)} style={{ padding: "13px 32px", borderRadius: 11, background: C.saffron, color: C.white, border: "none", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
-              {step === 1 ? "Continue to Payment →" : "Review Order →"}
-            </button>
-          </div>
-        )}
+  if (placedOrder) return <OrderPlaced order={placedOrder} />;
+
+  if (!mounted) {
+    return <div className="site-container py-16 text-center text-sm text-slate">Loading your cart…</div>;
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="site-container flex flex-col items-center gap-5 py-16 text-center md:py-24">
+        <span className="inline-flex h-16 w-16 items-center justify-center rounded-full bg-mist text-slate">
+          <Icon name="cart" size={30} />
+        </span>
+        <h1 className="heading-display text-[28px] md:text-[34px]">Your cart is empty</h1>
+        <p className="max-w-[420px] text-slate">Add the pooja essentials you need and they will appear here.</p>
+        <Link href="/shop" className="btn btn-gold">
+          Shop all products
+        </Link>
       </div>
-    </div>
+    );
+  }
+
+  // The unpaid order's total is exact (it includes any coupon); before an
+  // order exists the figure is the cart estimate.
+  const reusingOrder = pendingOrder?.signature === orderSignature;
+  const payable = reusingOrder ? pendingOrder.order.total : totals.total;
+
+  return (
+    <>
+      <div className="border-b border-line bg-offwhite">
+        <div className="site-container flex flex-col gap-4 py-6 md:py-7">
+          <h1 className="heading-display text-[28px] md:text-[38px]">{step === STEP_CART ? "Your Cart" : "Checkout"}</h1>
+          <CheckoutSteps steps={STEPS} current={step} />
+        </div>
+      </div>
+
+      <div className="site-container flex flex-col gap-6 pb-14 pt-6 md:flex-row md:items-start md:gap-9 md:pb-[72px] md:pt-9">
+        <div className="flex min-w-0 flex-1 flex-col gap-5">
+          {step !== STEP_CART && (
+            <button
+              type="button"
+              disabled={placing}
+              onClick={() => goTo(step - 1)}
+              className="inline-flex min-h-[40px] items-center gap-1 self-start text-sm font-semibold hover:text-navy-hover"
+            >
+              <Icon name="chevronLeft" size={16} />
+              Back to {STEPS[step - 1].toLowerCase()}
+            </button>
+          )}
+
+          {error && (
+            <p role="alert" className="rounded border border-danger bg-white p-4 text-sm font-semibold text-danger">
+              {error}
+            </p>
+          )}
+
+          {step === STEP_CART && (
+            <Panel title={`Items in your cart (${totals.count})`}>
+              <ul className="flex flex-col">
+                {items.map((item) => (
+                  <CartLineItem key={cartItemKey(item)} item={item} />
+                ))}
+              </ul>
+            </Panel>
+          )}
+
+          {step === STEP_ADDRESS && (
+            <Panel title="Delivery address">
+              <AddressStep selected={address} onSelect={setAddress} />
+            </Panel>
+          )}
+
+          {step === STEP_PAYMENT && (
+            <>
+              <Panel title="Payment method">
+                <PaymentMethods value={method} onChange={setMethod} disabled={placing || reusingOrder} />
+                {reusingOrder && (
+                  <p className="text-[13px] text-slate">
+                    Order {pendingOrder.order.orderId} is waiting for payment. Change the cart, address or coupon to
+                    start a new order instead.
+                  </p>
+                )}
+              </Panel>
+
+              <Panel
+                title="Delivering to"
+                action={
+                  <button
+                    type="button"
+                    disabled={placing}
+                    onClick={() => goTo(STEP_ADDRESS)}
+                    className="min-h-[36px] text-sm font-semibold underline"
+                  >
+                    Change
+                  </button>
+                }
+              >
+                {address && (
+                  <p className="text-sm leading-relaxed">
+                    <span className="font-semibold">{address.name}</span>
+                    <br />
+                    <span className="text-slate">{formatAddress(address)}</span>
+                    <br />
+                    <span className="text-slate">{address.phone}</span>
+                  </p>
+                )}
+              </Panel>
+
+              <Panel title={`Items (${totals.count})`}>
+                <ul className="flex flex-col">
+                  {items.map((item) => (
+                    <CartLineItem key={cartItemKey(item)} item={item} editable={false} />
+                  ))}
+                </ul>
+              </Panel>
+            </>
+          )}
+        </div>
+
+        <OrderSummary totals={totals} couponCode={couponCode} onCouponChange={setCouponCode} busy={placing}>
+          {step === STEP_CART && (
+            <>
+              <button type="button" onClick={startCheckout} className="btn btn-gold min-h-[54px] w-full">
+                {loggedIn ? "Proceed to checkout" : "Log in to checkout"}
+              </button>
+              {!loggedIn && <p className="text-[13px] text-slate">Your cart is saved on this device while you log in.</p>}
+            </>
+          )}
+
+          {step === STEP_ADDRESS && (
+            <button
+              type="button"
+              disabled={!address}
+              onClick={() => goTo(STEP_PAYMENT)}
+              className="btn btn-gold min-h-[54px] w-full"
+            >
+              Continue to payment
+            </button>
+          )}
+
+          {step === STEP_PAYMENT && (
+            <button type="button" disabled={placing || !address} onClick={placeOrder} className="btn btn-gold min-h-[54px] w-full">
+              {placing
+                ? "Please wait…"
+                : method === "cod"
+                  ? "Place order"
+                  : reusingOrder || !couponCode
+                    ? `Pay now · ${formatPrice(payable)}`
+                    : "Pay now"}
+            </button>
+          )}
+        </OrderSummary>
+      </div>
+    </>
   );
 }

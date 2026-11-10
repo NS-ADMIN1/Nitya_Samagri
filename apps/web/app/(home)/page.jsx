@@ -1,437 +1,106 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import Link from "next/link";
-import { apiFetch, isLoggedIn } from "../../lib/auth";
-import { useCartStore } from "../../lib/cartStore";
- 
-const COLORS = {
-  saffron: "#E8560A",
-  saffronLight: "#F47B3A",
-  marigold: "#F5A623",
-  marigoldLight: "#FAC65A",
-  deepRed: "#8B1A1A",
-  cream: "#FFF8EE",
-  creamDark: "#F5ECD8",
-  bark: "#5C3317",
-  gold: "#C8860A",
-  goldLight: "#E8A020",
-  text: "#2C1A0E",
-  textMid: "#5C3D20",
-  textLight: "#9A7050",
-  white: "#FFFFFF",
-};
- 
-// Converts a product from GET /api/v1/products (backend/src/modules/
-// products/product.routes.ts) into the shape ProductCard renders. The
-// backend has no image or aggregate-rating field on Product yet, so those
-// fall back to a placeholder emoji / null rather than being invented.
-function normalizeListedProduct(p) {
-  return {
-    id: p._id,
-    slug: p.slug,
-    name: p.name,
-    category: p.categoryId?.name || "Puja Samagri",
-    price: p.price,
-    mrp: p.mrp,
-    img: "🪔",
-    rating: null,
-    reviews: null,
-    badge: p.isFeatured ? "Featured" : null,
-  };
-}
- 
-// Fallback icon when a category has no imageUrl set yet.
-const DEFAULT_CATEGORY_ICON = "🪔";
-const FESTIVAL_BG_FALLBACK = "#FFF3EC";
+// apps/web/app/(home)/page.jsx — storefront homepage.
+//
+// The page only loads data and arranges sections; each section lives in
+// components/home. Header, footer and the mobile bottom bar come from
+// app/layout.tsx. Every section that depends on store data hides itself
+// when there is nothing real to show.
 
-function formatFestivalDate(startDate) {
-  if (!startDate) return "Coming Soon";
-  try {
-    return new Date(startDate).toLocaleDateString("en-IN", { month: "short", year: "numeric" });
-  } catch {
-    return "Coming Soon";
-  }
-}
- 
-function StarRating({ rating }) {
-  return (
-    <span style={{ color: COLORS.marigold, fontSize: 12, letterSpacing: -1 }}>
-      {"★".repeat(Math.floor(rating))}{"☆".repeat(5 - Math.floor(rating))}
-      <span style={{ color: COLORS.textLight, marginLeft: 4, fontSize: 11 }}>{rating}</span>
-    </span>
-  );
-}
- 
-function ProductCard({ product, onAddCart }) {
-  const [added, setAdded] = useState(false);
-  const disc = Math.round(((product.mrp - product.price) / product.mrp) * 100);
-  const handleAdd = () => { setAdded(true); onAddCart(product); setTimeout(() => setAdded(false), 1500); };
-  return (
-    <div style={{
-      background: COLORS.white, borderRadius: 16, overflow: "hidden",
-      border: `1px solid ${COLORS.creamDark}`, transition: "transform 0.2s, box-shadow 0.2s",
-      cursor: "pointer", position: "relative",
-    }}
-      onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 12px 32px rgba(232,86,10,0.12)"; }}
-      onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "none"; }}
-    >
-      {product.badge && (
-        <div style={{ position: "absolute", top: 12, left: 12, background: COLORS.saffron, color: COLORS.white, fontSize: 10, fontWeight: 600, padding: "3px 8px", borderRadius: 999, letterSpacing: 0.5 }}>
-          {product.badge}
-        </div>
-      )}
-      {disc > 0 && (
-        <div style={{ position: "absolute", top: 12, right: 12, background: COLORS.deepRed, color: COLORS.white, fontSize: 10, fontWeight: 600, padding: "3px 8px", borderRadius: 999 }}>
-          {disc}% OFF
-        </div>
-      )}
-      <Link href={`/product/${product.slug}`} style={{ textDecoration: "none", color: "inherit", display: "block" }}>
-        <div style={{ background: COLORS.cream, height: 140, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 56 }}>
-          {product.img}
-        </div>
-        <div style={{ padding: "14px 16px 0" }}>
-          <div style={{ fontSize: 11, color: COLORS.saffron, fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.8 }}>{product.category}</div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 6, lineHeight: 1.3 }}>{product.name}</div>
-        </div>
-      </Link>
-      <div style={{ padding: "0 16px 16px" }}>
-        {product.rating != null && (
-          <>
-            <StarRating rating={product.rating} />
-            <span style={{ fontSize: 11, color: COLORS.textLight, marginLeft: 4 }}>({product.reviews})</span>
-          </>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, marginBottom: 12 }}>
-          <span style={{ fontSize: 18, fontWeight: 700, color: COLORS.text }}>₹{product.price}</span>
-          {disc > 0 && <span style={{ fontSize: 13, color: COLORS.textLight, textDecoration: "line-through" }}>₹{product.mrp}</span>}
-        </div>
-        <button onClick={handleAdd} style={{
-          width: "100%", padding: "9px 0", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 13,
-          background: added ? COLORS.bark : COLORS.saffron, color: COLORS.white, transition: "background 0.3s",
-        }}>
-          {added ? "✓ Added" : "Add to Cart"}
-        </button>
-      </div>
-    </div>
-  );
-}
- 
-function Navbar({ cartCount }) {
-  // Read login state after mount — it lives in localStorage, so reading it
-  // during render would mismatch the server-rendered HTML.
-  const [loggedIn, setLoggedIn] = useState(false);
-  useEffect(() => { setLoggedIn(isLoggedIn()); }, []);
-  const [scrolled, setScrolled] = useState(false);
-  useEffect(() => {
-    const fn = () => setScrolled(window.scrollY > 40);
-    window.addEventListener("scroll", fn);
-    return () => window.removeEventListener("scroll", fn);
-  }, []);
-  return (
-    <nav style={{
-      position: "sticky", top: 0, zIndex: 100, background: scrolled ? "rgba(255,248,238,0.97)" : COLORS.cream,
-      backdropFilter: "blur(12px)", borderBottom: `1px solid ${scrolled ? COLORS.creamDark : "transparent"}`,
-      transition: "all 0.3s", padding: "0 24px",
-    }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto", height: 64, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 26 }}>🪔</span>
-          <div>
-            <div style={{ fontFamily: "'Georgia', serif", fontWeight: 700, fontSize: 18, color: COLORS.saffron, lineHeight: 1 }}>nityasamagri</div>
-            <div style={{ fontSize: 10, color: COLORS.textLight, letterSpacing: 1.5, textTransform: "uppercase" }}>Simplifying Your Spiritual Journey</div>
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, maxWidth: 380, margin: "0 32px" }}>
-          <div style={{ flex: 1, display: "flex", alignItems: "center", background: COLORS.white, border: `1.5px solid ${COLORS.creamDark}`, borderRadius: 10, padding: "0 14px", height: 40 }}>
-            <span style={{ marginRight: 8, color: COLORS.textLight }}>🔍</span>
-            <input placeholder="Search puja items…" style={{ border: "none", background: "transparent", outline: "none", fontSize: 13, color: COLORS.text, flex: 1 }} />
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
-          {[["Shop", "/shop"], ["Festivals", "/festival"]].map(([label, href]) => (
-            <Link key={label} href={href} style={{ fontSize: 13, fontWeight: 500, color: COLORS.textMid, cursor: "pointer", transition: "color 0.2s", textDecoration: "none" }}
-              onMouseEnter={e => e.target.style.color = COLORS.saffron}
-              onMouseLeave={e => e.target.style.color = COLORS.textMid}
-            >{label}</Link>
-          ))}
-          <Link href="/cart" style={{ position: "relative", cursor: "pointer" }}>
-            <span style={{ fontSize: 22 }}>🛒</span>
-            {cartCount > 0 && (
-              <div style={{ position: "absolute", top: -6, right: -6, background: COLORS.saffron, color: COLORS.white, borderRadius: "50%", width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700 }}>
-                {cartCount}
-              </div>
-            )}
-          </Link>
-          <Link href={loggedIn ? "/account" : "/login"} style={{ padding: "8px 18px", borderRadius: 10, background: COLORS.saffron, color: COLORS.white, border: "none", fontWeight: 600, fontSize: 13, cursor: "pointer", textDecoration: "none", display: "inline-block" }}>
-            {loggedIn ? "My Account" : "Login"}
-          </Link>
-        </div>
-      </div>
-    </nav>
-  );
-}
- 
-function AnnouncementBar() {
-  const msgs = ["🚚 Free delivery on orders above ₹499", "🪔 Temple-grade puja samagri, sourced ethically", "✨ Navratri Special Kits now available", "📦 Same-day dispatch on orders before 2 PM"];
-  const [idx, setIdx] = useState(0);
-  useEffect(() => { const t = setInterval(() => setIdx(i => (i + 1) % msgs.length), 3000); return () => clearInterval(t); }, []);
-  return (
-    <div style={{ background: COLORS.saffron, color: COLORS.white, textAlign: "center", padding: "8px 16px", fontSize: 13, fontWeight: 500, letterSpacing: 0.3 }}>
-      {msgs[idx]}
-    </div>
-  );
-}
- 
-export default function StoreFront() {
-  const cartItems = useCartStore((s) => s.items);
-  const addCartItem = useCartStore((s) => s.addItem);
-  const [activeTab, setActiveTab] = useState("all");
-  const [products, setProducts] = useState([]);
-  const [productsLoading, setProductsLoading] = useState(true);
-  const [productsError, setProductsError] = useState("");
-  const cartCount = cartItems.reduce((s, i) => s + i.qty, 0);
+import { useEffect, useState } from "react";
+import { apiFetch } from "../../lib/auth";
+import { findCategory, getCategories, getProducts } from "../../lib/catalog";
+import Hero from "../../components/home/Hero";
+import TrustStrip from "../../components/home/TrustStrip";
+import CategoryRow from "../../components/home/CategoryRow";
+import DailyEssentials from "../../components/home/DailyEssentials";
+import BestSellers from "../../components/home/BestSellers";
+import PoojaKits from "../../components/home/PoojaKits";
+import ShopByOccasion from "../../components/home/ShopByOccasion";
+import WhyChooseUs from "../../components/home/WhyChooseUs";
+
+// The homepage finds its two special categories by name, so they can be
+// created and renamed in Admin without a code change:
+//   • "Daily Pooja Essentials" → any category with "daily" in its name/slug
+//   • "Pooja Kits"             → any category with "kit" in its name/slug
+const DAILY_CATEGORY = /daily/i;
+const KITS_CATEGORY = /kit/i;
+
+const ESSENTIALS_LIMIT = 8;
+const BEST_SELLERS_LIMIT = 4;
+const KITS_LIMIT = 3;
+const FESTIVALS_LIMIT = 4;
+
+export default function HomePage() {
   const [categories, setCategories] = useState([]);
+  const [essentials, setEssentials] = useState({ products: [], loading: true, error: "", href: "/shop" });
+  const [bestSellers, setBestSellers] = useState([]);
+  const [kits, setKits] = useState({ products: [], href: "/shop" });
   const [festivals, setFestivals] = useState([]);
 
   useEffect(() => {
     let cancelled = false;
-    apiFetch("/categories")
-      .then(({ ok, body }) => { if (!cancelled && ok) setCategories(body.data.items || []); })
-      .catch(() => {});
+
+    async function load() {
+      const cats = await getCategories();
+      if (cancelled) return;
+      setCategories(cats);
+
+      const dailyCat = findCategory(cats, DAILY_CATEGORY);
+      const kitsCat = findCategory(cats, KITS_CATEGORY);
+
+      // Daily essentials: the daily category if it exists, otherwise the
+      // products marked "Featured" in Admin.
+      const essentialsQuery = dailyCat
+        ? { categoryId: dailyCat._id, limit: ESSENTIALS_LIMIT, sortBy: "sold", sortOrder: "desc" }
+        : { isFeatured: true, limit: ESSENTIALS_LIMIT };
+
+      const [essentialsRes, sellersRes, kitsRes] = await Promise.all([
+        getProducts(essentialsQuery),
+        getProducts({ limit: BEST_SELLERS_LIMIT, sortBy: "sold", sortOrder: "desc" }),
+        kitsCat ? getProducts({ categoryId: kitsCat._id, limit: KITS_LIMIT }) : Promise.resolve({ ok: true, products: [] }),
+      ]);
+      if (cancelled) return;
+
+      setEssentials({
+        products: essentialsRes.products,
+        loading: false,
+        error: essentialsRes.ok ? "" : essentialsRes.message,
+        href: dailyCat ? `/category/${dailyCat.slug}` : "/shop",
+      });
+      // "Best sellers" must mean it: only products that have real sales.
+      setBestSellers(sellersRes.products.filter((p) => p.sold > 0));
+      setKits({ products: kitsRes.products, href: kitsCat ? `/category/${kitsCat.slug}` : "/shop" });
+    }
+
+    load();
+
     apiFetch("/cms/festivals-public")
-      .then(({ ok, body }) => { if (!cancelled && ok) setFestivals((body.data.items || []).slice(0, 4)); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    setProductsLoading(true);
-    setProductsError("");
-
-    apiFetch("/products?limit=20&sortBy=sold&sortOrder=desc")
       .then(({ ok, body }) => {
-        if (cancelled) return;
-        if (!ok) { setProductsError(body.message || "Couldn't load products."); return; }
-        setProducts((body.data.products || []).map(normalizeListedProduct));
+        if (!cancelled && ok) setFestivals((body?.data?.items || []).slice(0, FESTIVALS_LIMIT));
       })
-      .catch(() => { if (!cancelled) setProductsError("Couldn't reach the server. Please try again."); })
-      .finally(() => { if (!cancelled) setProductsLoading(false); });
+      .catch(() => {});
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  const addToCart = (product) => {
-    addCartItem({
-      productId: product.id,
-      name: product.name,
-      price: product.price,
-      mrp: product.mrp,
-      icon: product.img,
-      category: product.category,
-    });
-  };
-
-  const filteredProducts = activeTab === "all" ? products : products.filter(p => p.category.toLowerCase().includes(activeTab));
 
   return (
-    <div style={{ background: COLORS.cream, minHeight: "100vh", fontFamily: "'Segoe UI', 'Helvetica Neue', sans-serif", color: COLORS.text }}>
-      <AnnouncementBar />
-      <Navbar cartCount={cartCount} />
- 
-      {/* Hero */}
-      <section style={{ maxWidth: 1200, margin: "0 auto", padding: "60px 24px 40px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 48, alignItems: "center" }}>
-        <div>
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: COLORS.white, border: `1px solid ${COLORS.creamDark}`, borderRadius: 999, padding: "6px 14px", marginBottom: 20, fontSize: 12, color: COLORS.saffron, fontWeight: 600 }}>
-            🪔 India's Trusted Spiritual Marketplace
-          </div>
-          <h1 style={{ fontFamily: "'Georgia', serif", fontSize: 52, lineHeight: 1.15, color: COLORS.text, margin: "0 0 16px", fontWeight: 700 }}>
-            Bringing<br />
-            <span style={{ color: COLORS.saffron }}>Divinity</span> to<br />
-            Your Doorstep
-          </h1>
-          <p style={{ fontSize: 16, color: COLORS.textMid, lineHeight: 1.7, marginBottom: 32, maxWidth: 420 }}>
-            Order pure, temple-grade puja samagri and get everything delivered anywhere in India.
-          </p>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <Link href="/shop" style={{ padding: "14px 28px", borderRadius: 12, background: COLORS.saffron, color: COLORS.white, border: "none", fontWeight: 700, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, textDecoration: "none" }}>
-              🛒 Shop Samagri
-            </Link>
-            <Link href="/festival" style={{ padding: "14px 28px", borderRadius: 12, background: "transparent", color: COLORS.saffron, border: `2px solid ${COLORS.saffron}`, fontWeight: 700, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, textDecoration: "none" }}>
-              🪔 Shop Festival Kits
-            </Link>
-          </div>
-          <div style={{ display: "flex", gap: 32, marginTop: 36 }}>
-            {[["15,000+", "Happy Customers"], ["1,250+", "Products"], ["320+", "Puja Kits"], ["4.9★", "Avg Rating"]].map(([v, l]) => (
-              <div key={l}>
-                <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.saffron }}>{v}</div>
-                <div style={{ fontSize: 11, color: COLORS.textLight }}>{l}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          {[
-            { icon: "🪔", title: "Pure Puja Samagri", sub: "Temple-grade ingredients", bg: COLORS.creamDark },
-            { icon: "🪷", title: "Festival Kits", sub: "Curated for every occasion", bg: "#FFF0E8" },
-            { icon: "📦", title: "Fast Delivery", sub: "Same day in select cities", bg: "#EEFFF4" },
-            { icon: "↩️", title: "Easy Returns", sub: "7-day hassle-free returns", bg: "#F8F0FF" },
-          ].map(card => (
-            <div key={card.title} style={{ background: card.bg, borderRadius: 16, padding: "24px 20px", cursor: "pointer", transition: "transform 0.2s" }}
-              onMouseEnter={e => e.currentTarget.style.transform = "scale(1.03)"}
-              onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"}
-            >
-              <div style={{ fontSize: 32, marginBottom: 10 }}>{card.icon}</div>
-              <div style={{ fontWeight: 700, fontSize: 14, color: COLORS.text, marginBottom: 4 }}>{card.title}</div>
-              <div style={{ fontSize: 12, color: COLORS.textLight }}>{card.sub}</div>
-            </div>
-          ))}
-        </div>
-      </section>
- 
-      {/* Categories */}
-      {categories.length > 0 && (
-      <section style={{ background: COLORS.white, padding: "48px 24px" }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 28 }}>
-            <h2 style={{ fontFamily: "'Georgia', serif", fontSize: 28, color: COLORS.text, margin: 0 }}>Browse by Category</h2>
-            <Link href="/shop" style={{ fontSize: 13, color: COLORS.saffron, cursor: "pointer", fontWeight: 600, textDecoration: "none" }}>View all →</Link>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 12 }}>
-            {categories.map(cat => (
-              <Link key={cat._id} href={`/category/${cat.slug}`} style={{ textDecoration: "none", textAlign: "center", cursor: "pointer", padding: "16px 8px", borderRadius: 14, border: `1.5px solid ${COLORS.creamDark}`, background: COLORS.cream, transition: "all 0.2s", display: "block" }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.saffron; e.currentTarget.style.background = "#FFF3EC"; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.creamDark; e.currentTarget.style.background = COLORS.cream; }}
-              >
-                <div style={{ fontSize: 28, marginBottom: 8 }}>{DEFAULT_CATEGORY_ICON}</div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.text, lineHeight: 1.3, marginBottom: 4 }}>{cat.name}</div>
-                <div style={{ fontSize: 10, color: COLORS.textLight }}>{cat.productCount} items</div>
-              </Link>
-            ))}
-          </div>
-        </div>
-      </section>
-      )}
- 
-      {/* Festival Campaigns */}
-      {festivals.length > 0 && (
-      <section style={{ padding: "48px 24px", maxWidth: 1200, margin: "0 auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 24 }}>
-          <h2 style={{ fontFamily: "'Georgia', serif", fontSize: 28, color: COLORS.text, margin: 0 }}>Festival Collections</h2>
-          <Link href="/festival" style={{ fontSize: 13, color: COLORS.saffron, fontWeight: 600, textDecoration: "none" }}>View all →</Link>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 16 }}>
-          {festivals.map(f => {
-            const color = f.color || COLORS.saffron;
-            return (
-              <Link key={f._id} href={`/festival/${f.slug}`} style={{ textDecoration: "none", background: FESTIVAL_BG_FALLBACK, borderRadius: 16, padding: "24px 20px", cursor: "pointer", border: "1.5px solid transparent", transition: "all 0.2s", display: "block" }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = color; e.currentTarget.style.transform = "translateY(-2px)"; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = "transparent"; e.currentTarget.style.transform = "translateY(0)"; }}
-              >
-                <div style={{ fontSize: 11, fontWeight: 600, color, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>{f.status === "active" ? "Live now" : formatFestivalDate(f.startDate)}</div>
-                <div style={{ fontFamily: "'Georgia', serif", fontSize: 22, fontWeight: 700, color: COLORS.text, marginBottom: 12 }}>{f.icon ? `${f.icon} ` : ""}{f.name}</div>
-                <div style={{ fontSize: 12, color: COLORS.textMid, marginBottom: 16 }}>Special kits & complete puja packages</div>
-                <span style={{ fontSize: 12, fontWeight: 700, color }}>Explore →</span>
-              </Link>
-            );
-          })}
-        </div>
-      </section>
-      )}
- 
-      {/* Products */}
-      <section style={{ background: COLORS.white, padding: "48px 24px" }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 24 }}>
-            <h2 style={{ fontFamily: "'Georgia', serif", fontSize: 28, color: COLORS.text, margin: 0 }}>Top Selling Products</h2>
-            <Link href="/shop" style={{ fontSize: 13, color: COLORS.saffron, cursor: "pointer", fontWeight: 600, textDecoration: "none" }}>View all →</Link>
-          </div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 28, flexWrap: "wrap" }}>
-            {["all", "hawan", "ghee", "phool", "prashad", "festival"].map(tab => (
-              <button key={tab} onClick={() => setActiveTab(tab)} style={{
-                padding: "7px 18px", borderRadius: 999, border: `1.5px solid ${activeTab === tab ? COLORS.saffron : COLORS.creamDark}`,
-                background: activeTab === tab ? COLORS.saffron : "transparent",
-                color: activeTab === tab ? COLORS.white : COLORS.textMid,
-                fontWeight: 600, fontSize: 12, cursor: "pointer", textTransform: "capitalize", transition: "all 0.2s",
-              }}>
-                {tab === "all" ? "All Products" : tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </button>
-            ))}
-          </div>
-          {productsLoading ? (
-            <div style={{ padding: "40px 0", textAlign: "center", color: COLORS.textLight, fontSize: 13 }}>Loading products…</div>
-          ) : productsError ? (
-            <div style={{ padding: "40px 0", textAlign: "center", color: "#C0392B", fontSize: 13 }}>{productsError}</div>
-          ) : filteredProducts.length === 0 ? (
-            <div style={{ padding: "40px 0", textAlign: "center", color: COLORS.textLight, fontSize: 13 }}>No products found.</div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20 }}>
-              {filteredProducts.map(p => <ProductCard key={p.id} product={p} onAddCart={addToCart} />)}
-            </div>
-          )}
-        </div>
-      </section>
- 
-      {/* Trust Badges */}
-      <section style={{ background: COLORS.white, padding: "40px 24px", borderTop: `1px solid ${COLORS.creamDark}` }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 24 }}>
-          {[
-            { icon: "🛡️", title: "100% Authentic Products", sub: "Temple-grade, sourced ethically" },
-            { icon: "🚚", title: "Free Delivery ₹499+", sub: "Pan India, tracked shipments" },
-            { icon: "↩️", title: "Easy Returns", sub: "7-day hassle-free returns" },
-            { icon: "🔒", title: "Secure Payments", sub: "Razorpay · UPI · COD" },
-          ].map(b => (
-            <div key={b.title} style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-              <span style={{ fontSize: 28, flexShrink: 0 }}>{b.icon}</span>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: COLORS.text, marginBottom: 4 }}>{b.title}</div>
-                <div style={{ fontSize: 12, color: COLORS.textLight }}>{b.sub}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
- 
-      {/* Footer */}
-      <footer style={{ background: COLORS.bark, color: COLORS.white, padding: "48px 24px 24px" }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 40, marginBottom: 40 }}>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                <span style={{ fontSize: 22 }}>🪔</span>
-                <span style={{ fontFamily: "'Georgia', serif", fontSize: 18, fontWeight: 700, color: COLORS.marigoldLight }}>nityasamagri</span>
-              </div>
-              <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", lineHeight: 1.7, maxWidth: 280, marginBottom: 16 }}>
-                India's most trusted platform for pure puja samagri. Bringing divinity to your doorstep since 2024.
-              </p>
-              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.5)" }}>📍 Mohali, Punjab · support@nityasamagri.in</div>
-            </div>
-            {[
-              { title: "Shop", links: ["Puja Samagri", "Ghee & Oils", "Hawan Items", "Idols & Books", "Festival Kits"] },
-              { title: "Help", links: ["Track Order", "Returns", "Privacy Policy", "Terms", "Contact Us"] },
-            ].map(col => (
-              <div key={col.title}>
-                <div style={{ fontWeight: 700, fontSize: 14, color: COLORS.marigoldLight, marginBottom: 16, textTransform: "uppercase", letterSpacing: 1 }}>{col.title}</div>
-                {col.links.map(l => (
-                  <div key={l} style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", marginBottom: 10, cursor: "pointer", transition: "color 0.2s" }}
-                    onMouseEnter={e => e.target.style.color = COLORS.marigoldLight}
-                    onMouseLeave={e => e.target.style.color = "rgba(255,255,255,0.6)"}
-                  >{l}</div>
-                ))}
-              </div>
-            ))}
-          </div>
-          <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>© 2026 nityasamagri. All rights reserved.</div>
-            <div style={{ display: "flex", gap: 16 }}>
-              {["UPI", "Razorpay", "COD", "Cards"].map(p => (
-                <span key={p} style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.08)", padding: "4px 10px", borderRadius: 6 }}>{p}</span>
-              ))}
-            </div>
-          </div>
-        </div>
-      </footer>
-    </div>
+    <>
+      <Hero essentialsHref={essentials.href} kitsHref={kits.href} />
+      <TrustStrip />
+      <CategoryRow categories={categories} />
+      <DailyEssentials
+        products={essentials.products}
+        loading={essentials.loading}
+        error={essentials.error}
+        href={essentials.href}
+      />
+      <BestSellers products={bestSellers} />
+      <PoojaKits products={kits.products} href={kits.href} />
+      <ShopByOccasion festivals={festivals} />
+      <WhyChooseUs />
+    </>
   );
 }

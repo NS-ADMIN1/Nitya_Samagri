@@ -1,8 +1,11 @@
 // apps/web/app/layout.tsx
-// Customer Storefront — nityasamagri
+// Customer storefront — Nitya Samagri
 
 import type { Metadata, Viewport } from "next";
 import { Inter, Playfair_Display } from "next/font/google";
+import Header from "../components/layout/Header";
+import Footer from "../components/layout/Footer";
+import MobileBottomNav from "../components/layout/MobileBottomNav";
 import "./globals.css";
 
 const inter = Inter({
@@ -15,68 +18,68 @@ const playfair = Playfair_Display({
   subsets:  ["latin"],
   variable: "--font-playfair",
   display:  "swap",
-  weight:   ["400", "600", "700", "900"],
+  weight:   ["500", "600", "700"],
 });
 
+const SITE_NAME = "Nitya Samagri";
+const SITE_URL = "https://nityasamagri.in";
+const SITE_DESCRIPTION =
+  "Everything for your daily pooja, under one roof. Shop pooja essentials and complete pooja kits online, delivered to your doorstep.";
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://nityasamagri.in"),
+  metadataBase: new URL(SITE_URL),
   title: {
-    default:  "nityasamagri — Pure Puja Samagri",
-    template: "%s | nityasamagri",
+    default:  `${SITE_NAME} — Everything for Your Daily Pooja`,
+    template: `%s | ${SITE_NAME}`,
   },
-  description:
-    "India's most trusted puja samagri platform. Order temple-grade puja samagri and get it delivered anywhere in India.",
+  description: SITE_DESCRIPTION,
   keywords: [
-    "puja samagri online",
-    "hawan samagri",
-    "cow ghee for puja",
-    "navratri puja kit",
-    "nityasamagri",
-    "online puja store india",
-    "buy puja items online",
+    "pooja samagri online",
+    "daily pooja essentials",
+    "pooja kit",
+    "agarbatti",
+    "kapoor",
+    "diya batti",
+    "havan samagri",
+    "Nitya Samagri",
   ],
-  authors:   [{ name: "nityasamagri", url: "https://nityasamagri.in" }],
-  creator:   "nityasamagri",
-  publisher: "nityasamagri",
+  authors:   [{ name: SITE_NAME, url: SITE_URL }],
+  creator:   SITE_NAME,
+  publisher: SITE_NAME,
   robots: {
     index:     true,
     follow:    true,
     googleBot: { index: true, follow: true, "max-image-preview": "large" },
   },
+  // A share image (og:image) is added here once a 1200×630 brand image
+  // exists in /public — pointing at a missing file breaks link previews.
   openGraph: {
     type:        "website",
     locale:      "en_IN",
-    url:         "https://nityasamagri.in",
-    siteName:    "nityasamagri",
-    title:       "nityasamagri — Pure Puja Samagri",
-    description: "Order pure, temple-grade puja samagri online. Delivered anywhere in India.",
-    images: [
-      {
-        url:    "/og-image.jpg",
-        width:  1200,
-        height: 630,
-        alt:    "nityasamagri — Simplifying Your Spiritual Journey",
-      },
-    ],
+    url:         SITE_URL,
+    siteName:    SITE_NAME,
+    title:       `${SITE_NAME} — Everything for Your Daily Pooja`,
+    description: SITE_DESCRIPTION,
   },
   twitter: {
-    card:        "summary_large_image",
-    title:       "nityasamagri — Pure Puja Samagri",
-    description: "India's trusted puja samagri platform.",
-    images:      ["/og-image.jpg"],
-    creator:     "@nityasamagri",
+    card:        "summary",
+    title:       `${SITE_NAME} — Everything for Your Daily Pooja`,
+    description: SITE_DESCRIPTION,
   },
   icons: {
-    icon:        [{ url: "/favicon.ico" }, { url: "/favicon-32x32.png", sizes: "32x32" }],
-    apple:       "/apple-touch-icon.png",
-    shortcut:    "/favicon-16x16.png",
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
+    ],
+    apple: "/apple-touch-icon.png",
   },
   manifest: "/manifest.json",
   category: "shopping",
 };
 
 export const viewport: Viewport = {
-  themeColor:   "#E8560A",
+  themeColor:   "#071C42",
   width:        "device-width",
   initialScale: 1,
   maximumScale: 5,
@@ -92,18 +95,23 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} ${playfair.variable}`}
     >
-      <body className="font-sans bg-cream antialiased min-h-screen">
+      <body className="flex min-h-screen flex-col bg-white font-sans text-navy antialiased">
         {/* Skip to main content for accessibility */}
         <a
           href="#main-content"
-          className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:px-4 focus:py-2 focus:bg-saffron focus:text-white focus:rounded"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:bg-navy focus:px-4 focus:py-2 focus:text-white"
         >
           Skip to main content
         </a>
 
-        <main id="main-content">
+        <Header />
+
+        <main id="main-content" className="flex-1">
           {children}
         </main>
+
+        <Footer />
+        <MobileBottomNav />
 
         {/* Razorpay checkout script */}
         <script
