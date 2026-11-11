@@ -1,16 +1,18 @@
-# nityasamagri admin panel
+# Nitya Samagri admin panel
 
-Staff-facing dashboard for the Nitya Samagri platform — orders, users,
-coupons, and storefront CMS content. Next.js 16 (App Router), talks to the
-`backend` API over REST.
+Staff-facing panel for the Nitya Samagri platform: orders, products, stock,
+coupons, storefront content, customers, reports and the team. Next.js 16
+(App Router), talks to the `backend` API over REST.
 
 ## Stack
 
 - Next.js 16 + React 18, TypeScript
-- Tailwind CSS (dark "obsidian + saffron" theme, see `tailwind.config.ts`)
+- Tailwind CSS — light theme in the brand palette (navy + gold on
+  off-white), the same values as `apps/web`; see `tailwind.config.ts`
 - SWR for data fetching/caching
-- Zustand, Zod (installed; not yet used by any of the four current pages)
-- No component library — everything is hand-rolled inline styles/Tailwind
+- Zustand, Zod (installed; not used yet)
+- No component library and no icon package — the shared pieces live in
+  `components/ui/`
 
 ## Getting started
 
@@ -50,26 +52,56 @@ domain.
 
 ## Structure
 
+Same layout as `apps/web`: routes in `app/`, UI in `components/`, data and
+helpers in `lib/`.
+
 ```
 app/
-├── layout.tsx              # Root layout — Inter + Playfair fonts, noindex metadata
-├── globals.css              # Tailwind + CSS-variable theme tokens
-├── login/page.tsx           # Staff login (@adminns.in email + password)
-├── dashboard/page.tsx       # Stats, recent orders, order status board, user list
-├── coupons/page.tsx         # Coupon CRUD
-├── store/page.tsx           # CMS: homepage sections, banners, festivals, blog, SEO pages, announcements
-├── _components/
-│   └── RequireAuth.tsx      # Client-side auth guard, wraps each page below login
-└── _lib/
-    ├── adminAuth.ts         # Session storage (localStorage) + login/logout
-    └── api.ts               # Fetch wrapper — attaches bearer token, auto-refreshes on 401
+├── layout.tsx               # Root layout — Inter font, noindex metadata
+├── globals.css              # Tailwind + light-theme base styles
+├── login/                   # Staff sign-in (@adminns.in email + password)
+├── dashboard/               # "Needs your attention" cards, store numbers, latest orders
+├── orders/                  # Orders by stage, next-step buttons, order detail panel
+├── products/                # Catalogue list + edit form; new/ is the Add product page
+├── inventory/               # Stock list, quick add/remove, per-product history
+├── coupons/                 # Coupon list + create/edit form
+├── store/                   # Storefront content (announcements, festivals, …)
+├── customers/               # Customer list (read-only)
+├── reports/                 # Sales, products and payments from real order data
+└── team/                    # Staff accounts, roles and permissions (super admin)
+
+components/
+├── layout/                  # AdminShell (frame for every page), Sidebar, Topbar, RequireAuth
+├── ui/                      # Button, Card, DataTable, Field, Icon, Notice, Pager, SearchInput,
+│                            # StatusPill, Tabs, Toggle, Avatar
+└── dashboard/ orders/ products/ inventory/ coupons/ store/ team/ reports/
+
+lib/
+├── api.ts                   # Fetch wrapper — attaches bearer token, auto-refreshes on 401
+├── adminAuth.ts             # Session storage (localStorage) + login/logout
+├── nav.ts                   # Sidebar menu and which roles see which items
+├── theme.ts, format.ts      # Brand values; money, date and count formatting
+├── orderStatus.ts           # Wording and colour for order and stock statuses
+└── orders.ts, stats.ts, products.ts, inventory.ts, coupons.ts, cms.ts, team.ts
+
+public/                      # brand/ logos and favicons (copied from apps/web)
 ```
+
+A new page only needs to wrap its content in `AdminShell`:
+
+```tsx
+<AdminShell title="Products" subtitle="186 products" actions={<Button…/>}>
+  …page content…
+</AdminShell>
+```
+
+`AdminShell` adds the login check, the sidebar and the page title bar.
 
 ## Auth model
 
 Staff log in with an `@adminns.in` email + password — **not** the phone-OTP
-flow customers use on `apps/web`. `adminAuth.ts` posts to
-`POST /api/v1/auth/login`; the backend itself rejects anyone without an
+flow customers use on `apps/web`. `lib/adminAuth.ts` posts to
+`POST /auth/login`; the backend itself rejects anyone without an
 admin/staff role, so the frontend's `@adminns.in` check is a UX nicety, not
 the real gate.
 
@@ -78,46 +110,63 @@ The session (access token, refresh token, user) lives in
 `RequireAuth` only checks that an access token is *present* client-side
 before rendering a page; it doesn't verify it's still valid, so an expired
 token briefly renders the page before the first API call 401s and
-`api.ts`'s auto-refresh logic either silently renews it or clears the
-session and bounces to `/login`.
+`lib/api.ts`'s auto-refresh logic either silently renews it or clears the
+session.
 
-One thing worth fixing separately: `RequireAuth.tsx`'s own comment still
-says the auth flow is "mock/local-only for now" — that's stale.
-`adminAuth.ts` has been a real, working login against the API for a while;
-the comment just never got updated.
+## Roles and the menu
+
+The login response carries the user's base role but not their individual
+permission list, so the sidebar (`lib/nav.ts`) filters menu items with a
+copy of the backend's role defaults (`backend/src/config/permissions.ts`,
+`DEFAULT_PERMISSIONS_BY_ROLE`). This only decides what is *shown* — the API
+enforces access on every call, and pages show a plain "no access" message
+when it refuses. If the defaults change in the backend, change them in
+`lib/nav.ts` too.
 
 ## Pages, and what they call
 
+All paths are under `/api/v1`.
+
 | Page | Backend endpoints it uses |
 |---|---|
-| `/login` | `POST /api/v1/auth/login` |
-| `/dashboard` | `GET /api/v1/orders/admin/stats`, `GET /api/v1/orders/admin/all`, `GET /api/v1/auth/admin/users` |
-| `/coupons` | `GET/POST/PATCH/DELETE /api/v1/coupons` |
-| `/store` | `GET/POST/PATCH/DELETE /api/v1/cms/{sections,banners,festivals,blogs,seo-pages,announcements}` |
-
-`coupons/page.tsx` adapts the real Mongo coupon document shape (`_id`,
-`minOrderValue`, no `desc`/`applicableTo`/`category`/`festivalTag` fields)
-into the shape the UI was originally built around, via a small
-`adaptCoupon()` function at the top of the file — worth knowing about if a
-coupon field ever looks like it's silently not saving.
+| `/login` | `POST /auth/login` |
+| `/dashboard` | `GET /orders/admin/stats`, `GET /orders/admin/all`, `GET /products/admin/all` |
+| `/orders` | `GET /orders/admin/all`, `GET /orders/:orderId`, `PATCH /orders/:orderId/status` |
+| `/products`, `/products/new` | `GET /products/admin/all`, `POST /products`, `PATCH/DELETE /products/:id`, `GET/POST /categories`, `GET/POST /brands` |
+| `/inventory` | `GET /products/admin/all`, `PATCH /products/:id/stock`, `GET /products/admin/:id/logs` |
+| `/coupons` | `GET/POST /coupons`, `PATCH/DELETE /coupons/:id` |
+| `/store` | `GET/POST/PATCH/DELETE /cms/{announcements,festivals,sections,banners,blogs,seo-pages}`, `GET /products` (festival product picker) |
+| `/customers` | `GET /auth/admin/users` |
+| `/reports` | `GET /orders/admin/stats` |
+| `/team` | `GET /team/permissions`, `GET/POST /team/members`, `PATCH /team/members/:id`, `GET/POST /team/roles`, `PATCH/DELETE /team/roles/:id` |
 
 ## Known gaps
 
-1. **No shared package between `apps/web` and `apps/admin`.** `_lib/api.ts`
-   and the general fetch-wrapper pattern are duplicated between the two
-   apps rather than pulled from a shared workspace package — expected in a
-   Turborepo, but worth knowing if you're about to fix a bug in one and
-   assume it'll also fix the other.
-2. **No tests.** There's no `*.test.tsx`/`*.spec.tsx` anywhere in this app,
+1. **Only announcements and festivals reach the customer site.** `apps/web`
+   reads `/cms/announcements` and `/cms/festivals-public`; homepage
+   sections, banners, blog posts and SEO pages are saved by the API but not
+   read by the storefront yet. Those four Storefront tabs say so on screen.
+2. **No product photos.** The Product model has no image field and there is
+   no upload endpoint, so the product form has no photo section.
+3. **No backend for some design items:** store-wide stock history, bulk
+   "receive shipment", invoices, blocking a customer, staff password reset
+   and a Settings page (shown as "Soon" in the menu).
+4. **Optional fields cannot be emptied on edit** (e.g. removing a coupon's
+   end date): the update endpoints ignore missing values and do not accept
+   `null`.
+5. **`lib/adminAuth.ts` and `lib/api.ts` build URLs differently.** Login
+   calls `${NEXT_PUBLIC_API_URL}/auth/login`, while everything else calls
+   `${NEXT_PUBLIC_API_URL}/api/v1/...`. Both cannot be right for the same
+   base URL unless a proxy rewrites one of them — worth checking against
+   the deployed Nginx config.
+6. **No shared package between `apps/web` and `apps/admin`.** The fetch
+   wrapper, theme values and formatting helpers are duplicated between the
+   two apps rather than pulled from a shared workspace package.
+7. **No tests.** There's no `*.test.tsx`/`*.spec.tsx` anywhere in this app,
    and no test runner configured in `package.json`.
-3. **`tsconfig.json`'s path aliases mostly point nowhere.** `@components/*`,
+8. **`tsconfig.json`'s path aliases point nowhere.** `@components/*`,
    `@lib/*`, `@hooks/*`, `@types/*` all resolve under `./src/*`, but this
-   app has no `src/` directory — everything lives under `app/`. Only `@/*`
-   (which also includes `./app/*`) is actually usable today.
-4. **CSP allows `'unsafe-inline'` and `'unsafe-eval'` in `script-src`**
-   (`next.config.ts`) — normal for an app using inline styles this
-   extensively, but worth tightening if this panel is ever internet-facing
-   beyond staff.
-5. No `public/` directory exists yet — the Dockerfile creates an empty one
-   at build time so the production image doesn't fail on a missing COPY
-   source (see the comment in `Dockerfile`).
+   app has no `src/` directory. The code uses relative imports instead.
+9. **CSP allows `'unsafe-inline'` and `'unsafe-eval'` in `script-src`**
+   (`next.config.ts`) — worth tightening if this panel is ever
+   internet-facing beyond staff.

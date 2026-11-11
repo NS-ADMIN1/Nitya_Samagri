@@ -68,10 +68,9 @@ RUN addgroup --system --gid 1001 nodejs \
 COPY --from=builder --chown=nextjs:nodejs /app/apps/admin/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/apps/admin/.next/static    ./apps/admin/.next/static
 
-# apps/admin has no public/ dir today. COPY has no "if exists" for build
-# contexts, so create an empty one instead of copying — avoids failing the
-# build now, and picks up real assets automatically if public/ is added later.
-RUN mkdir -p ./apps/admin/public && chown -R nextjs:nodejs ./apps/admin/public
+# Static assets (brand logos, favicons). Standalone output does not include
+# public/, so it is copied in explicitly — same as apps/web.
+COPY --from=builder --chown=nextjs:nodejs /app/apps/admin/public          ./apps/admin/public
 
 USER nextjs
 EXPOSE 3000

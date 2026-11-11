@@ -1,4 +1,4 @@
-// apps/admin/app/_lib/adminAuth.ts
+// apps/admin/lib/adminAuth.ts
 //
 // Real admin session handling, wired to POST /api/v1/auth/login. Staff log
 // in with an @adminns.in email (not phone — that's the customer flow on

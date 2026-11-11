@@ -4,37 +4,20 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── CSS Variables — Admin Dark Theme ──────────────────────────────────────── */
+/* ── CSS variables — light admin theme (navy + gold on off-white) ───────────
+   Same values as tailwind.config.ts and lib/theme.ts. */
 :root {
-  --font-inter:    'Inter', system-ui, sans-serif;
-  --font-playfair: 'Playfair Display', Georgia, serif;
+  --font-inter: 'Inter', system-ui, sans-serif;
 
-  --color-bg:          #0D0D0F;
-  --color-bg-card:     #141416;
-  --color-bg-elevated: #1A1A1E;
-  --color-bg-hover:    #1F1F24;
-
-  --color-saffron:     #E8560A;
-  --color-saffron-bg:  #1A0A04;
-  --color-marigold:    #F5A623;
-  --color-gold:        #D4A017;
-  --color-gold-bg:     #151000;
-
-  --color-text:        #F1F0EE;
-  --color-text-mid:    #9A9890;
-  --color-text-light:  #5A5856;
-
-  --color-border:       #242428;
-  --color-border-light: #2E2E34;
-
-  --color-green:  #22C55E;
-  --color-green-bg: #071A0F;
-  --color-red:    #EF4444;
-  --color-red-bg: #1A0707;
-  --color-blue:   #3B82F6;
-  --color-blue-bg:#070F1A;
-  --color-purple: #A855F7;
-  --color-purple-bg:#100718;
+  --color-navy:     #071C42;
+  --color-gold:     #D6AF43;
+  --color-bg:       #F8F8F5;
+  --color-card:     #FFFFFF;
+  --color-mist:     #F1F2F4;
+  --color-line:     #E3E5EA;
+  --color-field:    #B9BECA;
+  --color-text:     #071C42;
+  --color-text-mid: #566074;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -44,46 +27,41 @@ html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
 body {
   font-family:      var(--font-inter);
   background-color: var(--color-bg);
-  color:             var(--color-text);
-  line-height:       1.6;
+  color:            var(--color-text);
+  line-height:      1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-h1, h2, h3, h4, h5, h6 { font-family: var(--font-playfair); color: var(--color-text); line-height: 1.2; }
+h1, h2, h3, h4, h5, h6 { font-family: var(--font-inter); color: var(--color-text); line-height: 1.2; }
 
-a { color: var(--color-saffron); text-decoration: none; transition: color 0.2s; }
-a:hover { opacity: 0.85; }
+a { color: var(--color-navy); text-decoration: none; }
 
 img, video { max-width: 100%; height: auto; display: block; }
 
 button { cursor: pointer; font-family: inherit; border: none; background: transparent; }
+button:disabled { cursor: not-allowed; }
 input, textarea, select { font-family: inherit; font-size: inherit; }
 
 /* Scrollbar */
-::-webkit-scrollbar       { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--color-bg-card); }
-::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--color-saffron); }
+::-webkit-scrollbar       { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--color-mist); }
+::-webkit-scrollbar-thumb { background: var(--color-field); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-text-mid); }
 
-:focus-visible { outline: 2px solid var(--color-saffron); outline-offset: 2px; border-radius: 4px; }
+/* Keyboard focus: always visible, on light and on navy backgrounds */
+:focus-visible { outline: 2px solid var(--color-navy); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(214, 175, 67, 0.55); }
 
-/* Table styling */
+/* Table defaults */
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; }
 
-/* Animations */
-@keyframes spin  { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-@keyframes fadeIn{ from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+/* Motion: respect the device setting */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
 
-.animate-spin    { animation: spin 0.8s linear infinite; }
-.animate-pulse   { animation: pulse 2s ease-in-out infinite; }
-.animate-fade-in { animation: fadeIn 0.3s ease forwards; }
-.animate-slide-in{ animation: slideIn 0.3s ease forwards; }
-
-/* No-print for sensitive admin data */
+/* Keep sensitive admin data off printouts where marked */
 @media print {
   .no-print { display: none !important; }
 }

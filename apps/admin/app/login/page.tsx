@@ -1,32 +1,19 @@
 "use client";
 
-import type React from "react";
+// apps/admin/app/login/page.tsx
+//
+// Staff sign-in: @adminns.in email + password, checked by POST /auth/login
+// (see lib/adminAuth.ts). Already signed-in staff go straight to the
+// dashboard.
+
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { adminLogin, isAdminAuthed } from "../_lib/adminAuth";
-
-// ─── THEME: Obsidian + Saffron — matches dashboard/store/coupons ─────────────
-const C = {
-  bg:         "#0D0D0F",
-  bgCard:     "#141416",
-  bgElevated: "#1A1A1E",
-  saffron:    "#E8560A",
-  saffronBg:  "#1A0A04",
-  marigold:   "#F5A623",
-  red:        "#EF4444",
-  redBg:      "#1A0707",
-  text:       "#F1F0EE",
-  textMid:    "#9A9890",
-  textLight:  "#5A5856",
-  border:     "#242428",
-  borderLight:"#2E2E34",
-  white:      "#FFFFFF",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${C.border}`,
-  fontSize: 14, color: C.text, background: C.bgElevated, outline: "none", boxSizing: "border-box",
-};
+import Button from "../../components/ui/Button";
+import { Field, Input } from "../../components/ui/Field";
+import Notice from "../../components/ui/Notice";
+import { BRAND } from "../../lib/theme";
+import { adminLogin, isAdminAuthed } from "../../lib/adminAuth";
 
 export default function AdminLoginPage() {
   const router = useRouter();
@@ -40,73 +27,69 @@ export default function AdminLoginPage() {
     if (isAdminAuthed()) router.replace("/dashboard");
   }, [router]);
 
-  const submit = async (e: React.FormEvent) => {
+  const submit = async (e: { preventDefault: () => void }) => {
     e.preventDefault();
     setError("");
 
-    if (!email.trim()) { setError("Enter your admin email."); return; }
-    if (!email.toLowerCase().endsWith("@adminns.in")) { setError("Staff login requires an @adminns.in email address."); return; }
-    if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (!email.trim()) return setError("Enter your staff email.");
+    if (!email.toLowerCase().trim().endsWith("@adminns.in")) return setError("Staff sign-in needs an email ending in @adminns.in.");
+    if (password.length < 6) return setError("Enter your password (at least 6 characters).");
 
     setLoading(true);
     try {
       await adminLogin(email.trim(), password);
       router.push("/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid email or password.");
+      setError(err instanceof Error ? err.message : "Wrong email or password.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI','Helvetica Neue',sans-serif", padding: 24 }}>
-      <div style={{ width: "100%", maxWidth: 380 }}>
-        {/* Logo */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 32 }}>
-          <span style={{ fontSize: 26 }}>🪔</span>
+    <div className="flex min-h-screen flex-col bg-offwhite font-sans text-navy lg:flex-row">
+      {/* Brand panel */}
+      <div className="flex flex-col justify-between gap-10 bg-navy px-6 py-8 text-white sm:px-14 sm:py-14 lg:min-h-screen lg:flex-1">
+        <div className="flex items-center gap-3.5">
+          <span className="flex rounded-xl bg-white px-2.5 py-2">
+            <Image src={BRAND.logoMark} alt={BRAND.name} width={249} height={157} className="h-[34px] w-auto" priority />
+          </span>
+          <span className="flex flex-col leading-tight">
+            <span className="text-lg font-bold tracking-[0.02em] text-white">{BRAND.name}</span>
+            <span className="text-xs font-semibold uppercase tracking-[0.1em] text-gold">{BRAND.panel}</span>
+          </span>
+        </div>
+        <div className="hidden lg:block">
+          <div className="mb-6 h-[3px] w-12 rounded bg-gold" />
+          <p className="max-w-[460px] text-[34px] font-semibold leading-tight tracking-[-0.02em] text-white">{BRAND.tagline}.</p>
+          <p className="mt-4 max-w-[420px] text-[15px] leading-relaxed text-[#C5CEDF]">Orders, stock, products and offers for the {BRAND.name} team, in one simple workspace.</p>
+        </div>
+        <p className="hidden text-[13px] text-[#A9B4CB] lg:block">Staff access only.</p>
+      </div>
+
+      {/* Sign-in form */}
+      <div className="flex flex-1 items-center justify-center px-6 py-10">
+        <form onSubmit={submit} className="flex w-full max-w-[400px] flex-col gap-5" noValidate>
           <div>
-            <div style={{ fontFamily: "'Georgia',serif", fontWeight: 700, fontSize: 17, color: C.saffron, lineHeight: 1 }}>nityasamagri</div>
-            <div style={{ fontSize: 10, color: C.textLight, letterSpacing: 1.5, textTransform: "uppercase" }}>Admin Panel</div>
+            <h1 className="font-sans text-[28px] font-bold tracking-[-0.02em] text-navy">Sign in</h1>
+            <p className="mt-1.5 text-sm text-slate">Use your staff email ending in @adminns.in</p>
           </div>
-        </div>
 
-        <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 18, padding: "32px 32px" }}>
-          <h1 style={{ fontFamily: "'Georgia',serif", fontSize: 20, color: C.text, margin: "0 0 4px" }}>Sign in</h1>
-          <p style={{ fontSize: 13, color: C.textLight, margin: "0 0 24px" }}>Restricted to authorized staff only.</p>
+          <Field id="login-email" label="Staff email">
+            <Input id="login-email" type="email" autoComplete="username" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@adminns.in" />
+          </Field>
+          <Field id="login-password" label="Password">
+            <Input id="login-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" />
+          </Field>
 
-          <form onSubmit={submit}>
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textMid, marginBottom: 6 }}>Email</label>
-              <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@adminns.in" style={inputStyle} autoFocus />
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textMid, marginBottom: 6 }}>Password</label>
-              <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" style={inputStyle} />
-            </div>
+          {error && <Notice tone="error">{error}</Notice>}
 
-            <div style={{ textAlign: "right", marginBottom: 20 }}>
-              <span style={{ fontSize: 12, color: C.saffron, fontWeight: 600, cursor: "pointer" }}>Forgot password?</span>
-            </div>
+          <Button type="submit" loading={loading} fullWidth>
+            Sign in
+          </Button>
 
-            {error && (
-              <div style={{ background: C.redBg, color: C.red, fontSize: 12, fontWeight: 600, padding: "9px 12px", borderRadius: 8, marginBottom: 16, border: `1px solid ${C.red}33` }}>
-                {error}
-              </div>
-            )}
-
-            <button type="submit" disabled={loading} style={{
-              width: "100%", padding: "13px", borderRadius: 11, background: C.saffron, color: C.white,
-              border: "none", fontWeight: 700, fontSize: 14, cursor: loading ? "default" : "pointer", opacity: loading ? 0.7 : 1,
-            }}>
-              {loading ? "Signing in…" : "Sign In"}
-            </button>
-          </form>
-        </div>
-
-        <div style={{ textAlign: "center", marginTop: 20, fontSize: 11, color: C.textLight }}>
-          🔒 Sessions are logged. Unauthorized access is prohibited.
-        </div>
+          <p className="text-[13px] leading-relaxed text-slate">Forgot your password? Ask your Super Admin for help.</p>
+        </form>
       </div>
     </div>
   );

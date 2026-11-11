@@ -1,5 +1,5 @@
-// apps/admin/app/_lib/api.ts
-// Same pattern as apps/web/app/_lib/api.ts — separate copy since the two
+// apps/admin/lib/api.ts
+// Same pattern as the fetch wrapper in apps/web — separate copy since the two
 // apps are independent Next.js projects (no shared package in this repo).
 
 import { getAdminSession, setAdminSession, clearAdminSession } from "./adminAuth";
