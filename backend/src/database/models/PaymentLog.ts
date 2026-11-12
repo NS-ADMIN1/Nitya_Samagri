@@ -13,6 +13,7 @@ export interface IPaymentLog extends Document {
   gateway: string;
   errorCode?: string;
   errorDescription?: string;
+  refundId?: string; // Razorpay refund ID, on "refunded" entries
   createdAt: Date;
 }
 
@@ -28,6 +29,7 @@ const paymentLogSchema = new Schema<IPaymentLog>(
     gateway: { type: String, default: "razorpay" },
     errorCode: { type: String },
     errorDescription: { type: String },
+    refundId: { type: String, index: true, sparse: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );

@@ -1,6 +1,6 @@
 // src/database/seed.ts
 //
-// Minimal dev-only seed data — one admin user, one category, one product —
+// Minimal dev-only seed data — one super admin user, one category, one product —
 // enough to log in and see something in the storefront locally.
 // Run with: npm run seed  (see package.json)
 
@@ -22,7 +22,7 @@ async function seed() {
       phone: adminPhone,
       email: "admin@adminns.in",
       password: await bcrypt.hash("changeme123", 12),
-      role: "admin",
+      role: "super_admin",
       isVerified: true,
     });
     logger.info(`Seeded admin user (phone: ${adminPhone})`);

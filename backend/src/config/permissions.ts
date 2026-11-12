@@ -46,3 +46,13 @@ export const DEFAULT_PERMISSIONS_BY_ROLE: Record<string, string[]> = {
 export function isValidPermission(key: string): boolean {
   return PERMISSION_KEYS.includes(key);
 }
+/**
+ * The permissions a staff member actually has. super_admin has everything.
+ * A member with no saved list (an account made before Team & Roles, or the
+ * seeded admin) gets the defaults for their role.
+ */
+export function effectivePermissions(user: { role: string; permissions?: string[] | null }): string[] {
+  if (user.role === "super_admin") return PERMISSION_KEYS;
+  if (user.permissions && user.permissions.length > 0) return user.permissions;
+  return DEFAULT_PERMISSIONS_BY_ROLE[user.role] || [];
+}

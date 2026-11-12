@@ -1,6 +1,7 @@
 // src/middlewares/auth.middleware.ts
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { env } from "../config/env";
 import { AppError } from "../utils/AppError";
 
 declare global {
@@ -18,7 +19,7 @@ export function authenticate(req: Request, _res: Response, next: NextFunction) {
   }
   try {
     const token   = header.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ["HS256"] }) as { userId: string; role: string };
+    const decoded = jwt.verify(token, env.JWT_SECRET, { algorithms: ["HS256"] }) as { userId: string; role: string };
     req.user      = decoded;
     next();
   } catch {

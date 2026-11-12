@@ -7,6 +7,7 @@ import Razorpay from "razorpay";
 import crypto   from "crypto";
 import { logger } from "../utils/logger";
 import { AppError } from "../utils/AppError";
+import { env } from "../config/env";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,20 +67,30 @@ export interface WebhookEvent {
 // ── Service class ─────────────────────────────────────────────────────────────
 
 export class RazorpayService {
-  private client: Razorpay;
-  private keySecret: string;
-  private webhookSecret: string;
+  private razorpayClient?: Razorpay;
 
-  constructor() {
-    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-      throw new Error("Razorpay credentials not configured");
+  // Built on first use, not at import: the API must still start (and serve
+  // COD orders) when the Razorpay keys are not set.
+  private get client(): Razorpay {
+    if (!this.razorpayClient) {
+      if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
+        throw new AppError("Online payments are not configured", 503);
+      }
+      this.razorpayClient = new Razorpay({
+        key_id:     env.RAZORPAY_KEY_ID,
+        key_secret: env.RAZORPAY_KEY_SECRET,
+      });
     }
-    this.client = new Razorpay({
-      key_id:     process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
-    });
-    this.keySecret    = process.env.RAZORPAY_KEY_SECRET;
-    this.webhookSecret= process.env.RAZORPAY_WEBHOOK_SECRET || "";
+    return this.razorpayClient;
+  }
+
+  private get keySecret(): string {
+    if (!env.RAZORPAY_KEY_SECRET) throw new AppError("Online payments are not configured", 503);
+    return env.RAZORPAY_KEY_SECRET;
+  }
+
+  private get webhookSecret(): string {
+    return env.RAZORPAY_WEBHOOK_SECRET || "";
   }
 
   // ── Create Razorpay Order ──────────────────────────────────────────────────
@@ -114,10 +125,16 @@ export class RazorpayService {
       .update(body)
       .digest("hex");
 
-    const isValid = crypto.timingSafeEqual(
-      Buffer.from(expected, "hex"),
-      Buffer.from(params.razorpaySignature, "hex")
-    );
+    let isValid = false;
+    try {
+      isValid = crypto.timingSafeEqual(
+        Buffer.from(expected, "hex"),
+        Buffer.from(params.razorpaySignature, "hex")
+      );
+    } catch {
+      // timingSafeEqual throws when the lengths differ — that is simply an invalid signature
+      isValid = false;
+    }
 
     if (!isValid) {
       logger.warn(`Invalid Razorpay signature for order ${params.razorpayOrderId}`);

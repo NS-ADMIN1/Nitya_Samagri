@@ -1,7 +1,7 @@
 // src/config/env.ts
 //
 // Central env loader/validator. Every other config file (database, redis,
-// firebase) and the integrations (razorpay, twilio, etc.) read from here
+// firebase) and the integrations (razorpay, mail, etc.) read from here
 // instead of touching process.env directly, so a missing var fails fast
 // at boot instead of crashing deep inside a request handler.
 
@@ -19,6 +19,19 @@ const EnvSchema = z.object({
     .string()
     .default("http://localhost:3000,http://localhost:3001,http://localhost:3002")
     .transform((s) => s.split(",").map((o) => o.trim())),
+
+  // How many reverse proxies sit in front of the API (Nginx = 1). Express
+  // needs this to read the visitor's real IP from X-Forwarded-For — without
+  // it every request looks like it comes from the proxy, and the rate
+  // limiter treats all visitors as one.
+  TRUST_PROXY: z.coerce.number().int().min(0).default(1),
+
+  // Requests allowed per IP per 15 minutes across the whole API.
+  RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(1000),
+
+  // An online-payment order that is still unpaid after this many minutes is
+  // cancelled automatically and its stock and coupon are released.
+  UNPAID_ORDER_MINUTES: z.coerce.number().int().min(5).default(30),
 
   // MongoDB (was DATABASE_URL/Postgres)
   MONGO_URI: z.string().min(1, "MONGO_URI is required"),
@@ -45,16 +58,6 @@ const EnvSchema = z.object({
   ESHOPBOX_EXTERNAL_CHANNEL_ID: z.string().optional(),
   ESHOPBOX_WEBHOOK_SECRET: z.string().optional(),
 
-  // Twilio — no longer used for OTP/login (that's Firebase now), but still
-  // used by integrations/twilio.ts for order-status SMS. NOTE: twilio.ts
-  // reads these via process.env directly rather than importing `env` from
-  // here — listed here too so `env.ts` stays the source of truth for what
-  // vars the app actually uses, even though this particular file doesn't
-  // consume it that way yet.
-  TWILIO_SID: z.string().optional(),
-  TWILIO_TOKEN: z.string().optional(),
-  TWILIO_PHONE: z.string().optional(),
-
   // Email — Nodemailer over Gmail/Google Workspace SMTP (not SendGrid).
   // GMAIL_APP_PASSWORD must be a Google App Password, not the account's
   // real password — see .env.example for how to generate one.
@@ -71,6 +74,10 @@ const EnvSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
   AWS_S3_BUCKET: z.string().optional(),
+  // Address customers load photos from — a CloudFront domain in front of
+  // the bucket, e.g. https://media.nityasamagri.in. Leave empty to use the
+  // bucket's own address.
+  MEDIA_BASE_URL: z.string().url().optional().or(z.literal("")),
 
   // Firebase — phone OTP auth (Firebase sends the SMS client-side; backend
   // verifies the returned ID token via Admin SDK) + optional push notifications.

@@ -17,14 +17,13 @@
 import nodemailer, { Transporter } from "nodemailer";
 import { env } from "../config/env";
 import { logger } from "../utils/logger";
-import { AppError } from "../utils/AppError";
 
 let transporter: Transporter | null = null;
+let warnedNotConfigured = false;
 
-function getTransporter(): Transporter {
-  if (!env.GMAIL_USER || !env.GMAIL_APP_PASSWORD) {
-    throw new AppError("Email is not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing)", 500);
-  }
+/** The Gmail SMTP connection, or null when GMAIL_USER / GMAIL_APP_PASSWORD are not set. */
+function getTransporter(): Transporter | null {
+  if (!env.GMAIL_USER || !env.GMAIL_APP_PASSWORD) return null;
   if (!transporter) {
     transporter = nodemailer.createTransport({
       service: "gmail",
@@ -40,13 +39,22 @@ export async function sendEmail(params: {
   html: string;
   text?: string;
 }): Promise<void> {
-  if (process.env.NODE_ENV === "development") {
+  if (env.NODE_ENV === "development") {
     logger.info(`[EMAIL MOCK] To: ${params.to} | Subject: ${params.subject}`);
     return;
   }
 
-  await getTransporter().sendMail({
-    from: `"nityasamagri" <${env.GMAIL_USER}>`,
+  const smtp = getTransporter();
+  if (!smtp) {
+    if (!warnedNotConfigured) {
+      logger.warn("Email is not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing) — emails are being skipped");
+      warnedNotConfigured = true;
+    }
+    return;
+  }
+
+  await smtp.sendMail({
+    from: `"Nitya Samagri" <${env.GMAIL_USER}>`,
     to: params.to,
     subject: params.subject,
     html: params.html,

@@ -275,5 +275,5 @@ export function emitOrderUpdate(params: {
     payload: { orderId: params.orderId, status: params.status, timestamp: Date.now(), ...params.data },
   };
   emitToUser(params.userId, message);
-  emitToAdmins({ event: "NEW_ORDER_ALERT", payload: message.payload });
+  emitToAdmins(message);
 }

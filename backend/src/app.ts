@@ -4,33 +4,23 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import morgan from "morgan";
-import { rateLimit } from "express-rate-limit";
 
+import { env } from "./config/env";
+import { logger } from "./utils/logger";
 import { errorHandler } from "./middlewares/error.middleware";
-import { notFound }     from "./middlewares/notFound.middleware";
-import { logger }       from "./utils/logger";
-import { env }          from "./config/env";
-
-// ── Routes ────────────────────────────────────────────────────────────────────
-import authRoutes         from "./modules/auth/auth.routes";
-import addressRoutes      from "./modules/addresses/address.routes";
-import productRoutes      from "./modules/products/product.routes";
-import reviewRoutes       from "./modules/reviews/review.routes";
-import orderRoutes        from "./modules/orders/order.routes";
-import paymentRoutes      from "./modules/payments/payment.routes";
-import integrationsRoutes from "./integrations/integrations.routes";
-import couponRoutes        from "./modules/coupons/coupon.routes";
-import cmsRoutes           from "./modules/cms/cms.routes";
-import systemHealthRoutes  from "./modules/health/health.routes";
-import categoryRoutes      from "./modules/categories/category.routes";
-import brandRoutes         from "./modules/brands/brand.routes";
-import teamRoutes          from "./modules/team/team.routes";
+import { notFound } from "./middlewares/notFound.middleware";
+import { globalLimiter } from "./middlewares/rateLimit.middleware";
+import apiRoutes from "./routes";
 
 // This file builds and exports the Express app only — it never binds a port,
 // creates an HTTP server, or opens the WebSocket server. That work belongs to
 // server.ts, so this module can be imported safely by tests (supertest) and
 // anything else that just needs the request-handling pipeline.
 const app = express();
+
+// The API runs behind Nginx. Trusting the proxy makes req.ip the visitor's
+// real address (from X-Forwarded-For) instead of the proxy's own.
+app.set("trust proxy", env.TRUST_PROXY);
 
 // ── Security & Middleware ─────────────────────────────────────────────────────
 app.use(helmet());
@@ -46,35 +36,17 @@ app.use("/api/v1/payments/webhook", express.raw({ type: "application/json" }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── Global rate limiter ───────────────────────────────────────────────────────
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max:      100,
-  standardHeaders: true,
-  legacyHeaders:   false,
-  message: { success: false, message: "Too many requests, please try again later." },
-}));
-
 // ── Health check ──────────────────────────────────────────────────────────────
+// Registered before the rate limiter so container/uptime probes never get a 429.
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
 });
 
+// ── Global rate limiter ───────────────────────────────────────────────────────
+app.use(globalLimiter);
+
 // ── API Routes ────────────────────────────────────────────────────────────────
-const API = "/api/v1";
-app.use(`${API}/auth`,         authRoutes);
-app.use(`${API}/addresses`,    addressRoutes);
-app.use(`${API}/products`,     productRoutes);
-app.use(`${API}/reviews`,      reviewRoutes);
-app.use(`${API}/orders`,       orderRoutes);
-app.use(`${API}/payments`,     paymentRoutes);
-app.use(`${API}/integrations`, integrationsRoutes);
-app.use(`${API}/coupons`,      couponRoutes);
-app.use(`${API}/cms`,          cmsRoutes);
-app.use(`${API}/system`,       systemHealthRoutes);
-app.use(`${API}/categories`,   categoryRoutes);
-app.use(`${API}/brands`,       brandRoutes);
-app.use(`${API}/team`,         teamRoutes);
+app.use("/api/v1", apiRoutes);
 
 // ── Error handlers ────────────────────────────────────────────────────────────
 app.use(notFound);

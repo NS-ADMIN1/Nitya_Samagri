@@ -76,9 +76,6 @@ jobs:
       NODE_ENV:                test
       RAZORPAY_KEY_ID:         rzp_test_dummy
       RAZORPAY_KEY_SECRET:     dummy_secret
-      TWILIO_SID:              ACdummy
-      TWILIO_TOKEN:            dummy
-      TWILIO_PHONE:            "+10000000000"
       GMAIL_USER:              noreply@example.com
       GMAIL_APP_PASSWORD:      dummy_app_password
       FIREBASE_PROJECT_ID:     test-project

@@ -39,6 +39,9 @@ export interface IOrder extends Document {
   refundAmount?: number;
   trackingNo?: string;
   courierName?: string;
+  invoiceNo?: string;   // tax invoice number, given the first time the invoice is opened
+  invoiceDate?: Date;
+  stockReleased: boolean; // true once this order's items were put back into stock (cancelled / returned / refunded before shipping)
   createdAt: Date;
   updatedAt: Date;
 }
@@ -87,6 +90,9 @@ const orderSchema = new Schema<IOrder>(
     refundAmount: { type: Number, default: 0 },
     trackingNo: { type: String, index: true, sparse: true },
     courierName: { type: String },
+    invoiceNo: { type: String, index: true, sparse: true, unique: true },
+    invoiceDate: { type: Date },
+    stockReleased: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

@@ -105,7 +105,6 @@ WebSocket            →  wss://api.adminns.in/ws
 | Razorpay | Payments, refunds, webhooks |
 | Eshopbox | Shipping, AWB, tracking (replaces Shiprocket) |
 | Firebase Auth | Phone OTP login (client sends the SMS, backend verifies the ID token) |
-| Twilio | Order-status SMS updates only — no longer used for OTP |
 | Gmail SMTP (Nodemailer) | Transactional emails (replaces SendGrid) |
 | WhatsApp Business API | Order notifications |
 | Google Analytics 4 | Web analytics |
@@ -291,10 +290,6 @@ FIREBASE_PROJECT_ID=your-firebase-project-id
 FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com
 FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nXXXX\n-----END PRIVATE KEY-----\n"
  
-# Twilio (order-status SMS only — OTP is handled by Firebase above)
-TWILIO_SID=ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-TWILIO_TOKEN=your_auth_token
-TWILIO_PHONE=+1XXXXXXXXXX
  
 # Gmail SMTP (Email, via Nodemailer — use a Google Workspace address or a
 # Gmail account with an App Password: https://myaccount.google.com/apppasswords)
@@ -616,19 +611,6 @@ FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nXXXX\n-----END PRIVATE KEY---
 Firebase handles sending the OTP SMS client-side; the backend only verifies
 the ID token it gets back via the Firebase Admin SDK's `verifyIdToken()`.
 
-### Twilio Setup (order-status SMS only)
-```bash
-# No longer used for OTP (see Firebase above) — only for shipped/delivered
-# order-update SMS, via src/integrations/twilio.ts.
-# 1. Create account at twilio.com
-# 2. Get Account SID and Auth Token from dashboard
-# 3. Buy a phone number to send from
-# 4. Add to .env:
-TWILIO_SID=ACXXXXX
-TWILIO_TOKEN=XXXXX
-TWILIO_PHONE=+1XXXXXXXXXX
-```
- 
 ---
  
 ## 🤝 Contributing

@@ -5,6 +5,7 @@ import { logger } from "./utils/logger";
 import { env } from "./config/env";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { redis } from "./config/redis";
+import { startUnpaidOrdersJob, stopUnpaidOrdersJob } from "./jobs/unpaidOrders.job";
 
 // This is the process entrypoint. app.ts only builds the Express app;
 // everything that has a side effect on the outside world — opening a
@@ -28,9 +29,13 @@ async function start() {
     logger.info(`🌍 Environment: ${env.NODE_ENV}`);
   });
 
+  // ── Background jobs ──────────────────────────────────────────────────────
+  startUnpaidOrdersJob();
+
   // ── Graceful shutdown ────────────────────────────────────────────────────
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received, shutting down gracefully...`);
+    stopUnpaidOrdersJob();
     server.close(async () => {
       await disconnectDatabase();
       redis.disconnect();

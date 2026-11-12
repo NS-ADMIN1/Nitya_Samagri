@@ -1,62 +1,35 @@
-# nityasamagri backend
+# Nitya Samagri backend
 
-REST + WebSocket API for the Nitya Samagri platform (puja samagri e-commerce
-+ pandit booking). Express + TypeScript, MongoDB via Mongoose, Redis for
-caching/rate-limiting.
-
-> **⚠️ Not yet runnable end-to-end.** The config/database/models layer
-> below is fully converted and real. The route files
-> (`src/modules/*/**.routes.ts`, `src/integrations/integrations.routes.ts`,
-> `src/shared.ts`) still call `prisma.*` from the original Postgres/Prisma
-> version of this app and have not been converted to the Mongoose models
-> yet. The app will not build/run until that conversion is done — see
-> "Known gaps" below.
-
-## What changed from the original scaffold
-
-This backend was originally built around PostgreSQL + Prisma, with Twilio
-for OTP, SendGrid for email, and Shiprocket for shipping. It's being
-migrated to:
-
-| Was | Now |
-|---|---|
-| PostgreSQL + Prisma | MongoDB + Mongoose (`src/database/models/*.ts`, no `prisma/schema.prisma`) |
-| Twilio (OTP/login SMS) | Firebase Auth — client verifies phone OTP, backend verifies the ID token (`src/config/firebase.ts`'s `verifyOtpToken()`). **Required in all environments**, not optional. |
-| SendGrid (email) | Nodemailer over Gmail/Google Workspace SMTP (`src/integrations/mail.ts`) |
-| Shiprocket (shipping) | Eshopbox (`src/integrations/eshopbox.service.ts`) — Eshopbox is a managed 3PL/WMS, not a rate aggregator, so a few Shiprocket-only methods (courier selection, AWB assignment, pickup scheduling) throw "not applicable" rather than being faked |
-| Twilio for order-status SMS | **Unchanged for now** — `src/integrations/twilio.ts` still exists and is still in `package.json`; only the OTP/login flow moved to Firebase. Confirm this is still what you want when the route conversion reaches `notifications.service.ts`. |
-
-See [`../nitya-samagri-devops/README.md`](../nitya-samagri-devops/README.md)
-for the infra side of the Mongo switch (Docker, nginx, etc).
+REST + WebSocket API for the Nitya Samagri store. Express + TypeScript,
+MongoDB (Mongoose), Redis.
 
 ## Stack
 
 - Express 4 + TypeScript
-- MongoDB (Mongoose 8) — see `src/database/models/`
-- Redis (ioredis) — caching (`src/cache/`) + rate limiting
-- JWT auth (access + refresh tokens) + Google OAuth; phone OTP via Firebase
-- Razorpay (payments), Eshopbox (shipping/fulfillment), Gmail SMTP (email),
-  WhatsApp Business API, Firebase Admin (OTP verification, and available
-  for push notifications — push itself isn't called from anywhere yet)
-- WebSocket server for real-time order updates (`src/websocket/`)
+- MongoDB via Mongoose 8 — models in `src/database/models/`
+- Redis (ioredis) — product cache, login lockout, refresh tokens, WebSocket fan-out
+- JWT access + refresh tokens; customer phone OTP through Firebase Auth
+- Razorpay (payments), Eshopbox (shipping), Gmail SMTP via Nodemailer (email)
+- WebSocket server for live order updates (`src/websocket/`)
 - Jest + Supertest for tests
 
 ## Getting started
 
 ```bash
-cp .env.example .env   # fill in real values — MONGO_URI, JWT secrets,
-                        # FIREBASE_*, GMAIL_*, ESHOPBOX_*, etc.
-npm install
-npm run dev             # http://localhost:4000 — will fail to build until
-                         # the route files are converted, see warning above
+cp .env.example .env    # MONGO_URI, JWT secrets, FIREBASE_*, RAZORPAY_* …
+npm install             # from the repo root (npm workspaces)
+npm run dev             # http://localhost:4000
 ```
 
-Requires a running MongoDB + Redis — either point `.env` at your own, or
-run them via the devops repo:
+Needs MongoDB and Redis running. From the repo root:
 
 ```bash
-docker compose -f ../nitya-samagri-devops/docker/docker-compose.dev.yml up -d mongodb redis
+docker compose -f devops/docker/docker-compose.dev.yml up -d mongodb redis
 ```
+
+Orders, cancellations, stock updates and payment confirmation use MongoDB
+transactions, which only work on a replica set (MongoDB Atlas, or a local
+`mongod --replSet`), not on a plain standalone server.
 
 ## Scripts
 
@@ -65,57 +38,149 @@ docker compose -f ../nitya-samagri-devops/docker/docker-compose.dev.yml up -d mo
 | `npm run dev` | Start with hot-reload (ts-node-dev) |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm start` | Run the compiled build |
-| `npm run seed` | Seed a demo admin user, category, and product (`src/database/seed.ts`) |
-| `npm run migrate` | Runs `scripts/migrate.ts` if present — **that file doesn't exist yet**; add one (e.g. via `migrate-mongo`) if you need real migrations |
+| `npm run seed` | Seed a demo admin user, category and product |
 | `npm test` | Run the Jest suite |
-| `npm run lint` | ESLint |
+| `npm run lint` | ESLint (no config file in this folder yet) |
+
+Server scripts (deploy, rollback, backup, smoke test) live in `devops/scripts/`.
 
 ## Structure
 
 ```
 src/
-├── app.ts, server.ts               # Express app, HTTP+WS server
-├── shared.ts                       # ⚠️ dead reference file — not imported anywhere,
-│                                    #    kept only as a snippet reference; ignore it
-├── cache/                          # Redis key naming + get/set-JSON helpers        ✅
-├── config/                         # env, database (Mongo), redis, firebase        ✅
-├── database/
-│   ├── models/                     # 23 real Mongoose schemas                      ✅
-│   ├── indexes.ts                  # explicit index sync                           ✅
-│   └── seed.ts                     # dev seed data                                 ✅
-├── integrations/
-│   ├── eshopbox.service.ts         # ✅ new
-│   ├── mail.ts                     # ✅ new
-│   ├── razorpay.service.ts         # not yet reviewed for the Mongo switch
-│   ├── twilio.ts                   # still used — order-status SMS only now
-│   ├── notifications.service.ts    # ⚠️ still calls prisma — pending conversion
-│   ├── sendgrid.ts                 # ⚠️ stale, superseded by mail.ts — delete once
-│   │                                #    nothing imports it anymore
-│   ├── shiprocket.service.ts       # ⚠️ stale, superseded by eshopbox.service.ts —
-│   │                                #    delete once nothing imports it anymore
-│   └── integrations.routes.ts      # ⚠️ still calls prisma — pending conversion
-├── middlewares/                    # auth, RBAC, validation, error handling        ✅ (untouched, already real)
-├── modules/
-│   ├── auth/auth.routes.ts         # ⚠️ still calls prisma — pending conversion
-│   ├── products/product.routes.ts  # ⚠️ still calls prisma — pending conversion
-│   ├── orders/order.routes.ts      # ⚠️ still calls prisma — pending conversion
-│   └── payments/payment.routes.ts  # ⚠️ still calls prisma — pending conversion
-├── utils/                          # AppError, logger, paginate                    ✅ (untouched, already real)
-└── websocket/                      # real-time order status pushes                 ✅ (untouched, already real)
+├── server.ts          starts the server (DB connection, HTTP, WebSocket)
+├── app.ts             builds the Express app (security, body parsing, rate limit)
+├── routes.ts          mounts every module under /api/v1
+├── config/            env (validated at boot), database, redis, firebase, permissions
+├── modules/           one folder per feature
+│   └── <feature>/
+│       ├── <feature>.routes.ts       URLs + who may call them + validation
+│       ├── <feature>.controller.ts   request in, response out
+│       ├── <feature>.service.ts      business logic and database access
+│       └── <feature>.schema.ts       Zod input validation
+├── integrations/      Razorpay, Eshopbox, mail (Gmail SMTP)
+├── notifications/     what customers and the team are told (email, live alerts)
+├── jobs/              background tasks (cancel unpaid orders)
+├── database/          models + seed
+├── middlewares/       auth, roles, validation, errors, rate limit
+├── cache/             Redis cache helpers
+├── websocket/         live updates
+└── utils/             AppError, logger, paginate, slugify, validators
+tests/                 unit + integration
 ```
+
+### How a request flows
+
+```
+Request → Route → Controller → Service → Model (MongoDB)
+                                  ├──→ Integrations (Razorpay, Eshopbox, mail)
+                                  └──→ Notifications (email, live alerts)
+```
+
+- **Routes** only say the URL, who may call it and which schema validates it.
+- **Controllers** are thin: read the request, call one service, send the response.
+- **Services** hold the business logic and are the only layer that touches
+  models and integrations.
+- **Config** is read through `config/env.ts`, not `process.env`.
+- **Errors**: throw `AppError(message, status)`; `middlewares/error.middleware.ts`
+  turns every error into `{ success: false, message, errors? }`.
+
+Every module follows this layout except `health` (one small file). Two
+modules share an address with another: `inventory` is served under
+`/products`, and `customers` under `/auth/admin/users`.
+
+### Endpoints added in the backend rework
+
+| Endpoint | For |
+|---|---|
+| `PATCH /auth/me` | A person edits their own name / email |
+| `PATCH /auth/admin/users/:id/status` | Block or unblock a customer |
+| `POST /team/members/:id/reset-password` | New temporary password for a staff member |
+| `POST /coupons/validate` | Check a coupon against the cart before ordering |
+| `GET /products/admin/stock-logs` | Stock history across all products |
+| `POST /products/admin/receive` | Receive a supplier delivery (many products at once) |
+| `GET /reviews/admin/all`, `PATCH`/`DELETE /reviews/admin/:id` | Hide, show or remove reviews |
+| `GET /settings`, `PATCH /settings` | Store details: name, GSTIN, address, support contact, invoice prefix |
+| `GET /settings/public` | Store name and support contact for the storefront |
+| `GET /orders/:orderId/invoice` | The GST invoice as data; add `?format=html` for a printable page |
+| `POST /media/upload-url` | A signed link for uploading one photo to S3 |
+
+Changed: products now carry `images`, `imageUrl`, `rating` and
+`reviewCount`; `POST`/`PATCH /products` accept `images` and (on edit)
+`variants`; `PATCH /products/:id/stock` accepts `variantId`;
+`GET /integrations/shipping/track/:orderId` needs a login.
+
+### Who may do what
+
+- **Customers** sign in with phone + password or phone OTP (Firebase).
+  **Staff** sign in with an `@adminns.in` email and password.
+- **Sessions**: a 15-minute access token plus a refresh token kept in Redis.
+  Each refresh re-reads the account, so a blocked account cannot renew and a
+  changed role is picked up. Blocking someone deletes their refresh token.
+- **Admin routes check permissions** (`requirePermission` in
+  `middlewares/rbac.middleware.ts`, list in `config/permissions.ts`) against
+  the database on every request, so a change by the super admin applies at
+  once. A member with no saved permissions gets their role's defaults.
+- **Team & Roles** stays super-admin only.
+- **Public content** (`GET /cms/:resource`) returns only live items to
+  visitors and everything to signed-in staff.
+
+### How orders and money work
+
+- **Totals and status rules** are plain functions in `modules/orders/order.rules.ts`.
+- **Stock and coupon holds**: taken when an order is placed, given back once
+  when it is cancelled, returned, or fully refunded before shipping
+  (`modules/orders/order.stock.ts`).
+- **Unpaid online orders** are cancelled after `UNPAID_ORDER_MINUTES`
+  (default 30) by `jobs/unpaidOrders.job.ts`, which frees their stock.
+- **Payments** are recorded once, whether the browser (`/payments/verify`)
+  or Razorpay's webhook reports them first.
+- **Cancelling a paid order refunds it automatically** through Razorpay; if
+  that fails, the order timeline says so and the team is alerted.
+- **Cash on delivery** orders become paid when marked delivered.
+
+### Photo uploads (AWS S3)
+
+Photos go from the admin's browser straight to the bucket; the API only
+signs a link (`integrations/s3.ts`, no AWS package needed):
+
+1. `POST /media/upload-url` with `{ folder, contentType }` → `{ uploadUrl, headers, publicUrl }`
+2. the browser sends the file with `PUT uploadUrl` and those `headers`
+3. `publicUrl` is saved on the product (`images: [{ url }]`), category, banner …
+
+JPG, PNG and WebP only; a link is valid for 5 minutes and for one file type.
+
+The bucket needs two things set once in the AWS console:
+
+- **CORS**, so the admin site may upload:
+  `AllowedMethods: ["PUT"]`, `AllowedHeaders: ["*"]`,
+  `AllowedOrigins: ["https://adminns.in"]` (add `http://localhost:3001` for local work).
+- **Public read** for the photos — either a bucket policy allowing
+  `s3:GetObject` to everyone, or a CloudFront distribution in front of the
+  bucket with its address in `MEDIA_BASE_URL`.
+
+The IAM user behind `AWS_ACCESS_KEY_ID` only needs `s3:PutObject` on this bucket.
+
+### Invoices
+
+- An invoice needs the store's GSTIN and address, set once in Settings.
+- The invoice number (`NS/2026-27/000123`, one series per financial year) is
+  given the first time an invoice is opened, and never changes.
+- GST is split into CGST + SGST when the delivery state is the store's
+  state, and shown as IGST otherwise (`modules/invoices/invoice.rules.ts`).
+- There is no PDF library: `?format=html` returns a printable A4 page, and
+  the browser's "Save as PDF" makes the PDF.
 
 ## Known gaps
 
-1. **Route conversion is the big one.** `auth.routes.ts`, `product.routes.ts`,
-   `order.routes.ts`, `payment.routes.ts`, `integrations.routes.ts`
-   (~2,200 lines total) still import Prisma and need converting to use the
-   Mongoose models in `src/database/models/`. Nothing will actually run
-   until this is done.
-2. `sendgrid.ts` and `shiprocket.service.ts` are dead weight until the
-   route files above stop importing them — delete both once that's done.
-3. `npm run migrate` has no real script behind it yet (see Scripts table).
-4. `AWS_*` env vars are read in `.env.example` but no S3 upload code was
-   found in the route files — confirm where media uploads actually happen.
-5. `eshopbox.service.ts`'s tracking/webhook field names are best-effort —
-   confirmed against Eshopbox's public docs only for order creation and
-   auth; verify the rest against a real payload from your workspace.
+1. Replaced or removed photos are not deleted from the S3 bucket; they stay
+   there unused.
+2. `eshopbox.service.ts` tracking and webhook field names are best-effort;
+   verify against a real payload from the Eshopbox workspace.
+3. Models with no API yet: pandit booking, wishlist, loyalty log, returns,
+   support tickets.
+4. Tests cover validation, health, 404, the product cache and the pure
+   rules (totals, order status flow, permissions) — nothing yet that runs
+   orders or payments against a database.
+5. Customers get emails and live updates only; no SMS is sent (Twilio was
+   removed). A customer without an email on file gets no order emails.
