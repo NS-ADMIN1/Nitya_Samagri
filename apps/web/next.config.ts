@@ -60,12 +60,14 @@ const nextConfig: NextConfig = {
             key:   "Content-Security-Policy",
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://checkout.razorpay.com https://www.googletagmanager.com https://connect.facebook.net",
+              // Firebase phone OTP (apps/web/lib/firebase.ts) needs Google's
+              // reCAPTCHA script + frame and Firebase Auth's servers.
+              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://checkout.razorpay.com https://www.googletagmanager.com https://connect.facebook.net https://www.google.com https://www.gstatic.com https://apis.google.com",
               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
               "font-src 'self' https://fonts.gstatic.com",
               "img-src 'self' data: blob: https: http:",
-              "connect-src 'self' https://api.adminns.in wss://api.adminns.in https://lumberjack.razorpay.com",
-              "frame-src https://api.razorpay.com",
+              "connect-src 'self' https://api.adminns.in wss://api.adminns.in https://lumberjack.razorpay.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.google.com",
+              "frame-src https://api.razorpay.com https://www.google.com https://*.firebaseapp.com",
             ].join("; "),
           },
         ],
