@@ -1,0 +1,297 @@
+name: 🩺 Integration Check
+
+# Checks our own servers and every third-party service the store depends on.
+#
+#   • All working  → a success report is mailed, and the next check is
+#                    6 hours later.
+#   • Any failure  → a failure report is mailed, and the check repeats EVERY
+#                    HOUR (with a mail each time) until everything works
+#                    again. A "recovered" report is mailed when it does.
+#
+# Who gets the mail:
+#   • REPORT_TO (below)           every report — success and failure
+#   • ALERT_EMAIL_FAILURE_ONLY    failure reports only
+#
+# How the hourly repeat works: the workflow is started every hour, but the
+# five "in-between" hours only do a check when the previous run failed.
+# A run is marked failed whenever a check fails, so that is the memory.
+#
+# Secrets used (Settings → Secrets and variables → Actions):
+#   GMAIL_USER, GMAIL_APP_PASSWORD   required — the same Gmail account and
+#                                    App Password the backend sends mail with
+#   ALERT_EMAIL_FAILURE_ONLY         the address(es) that get failure reports
+#                                    only, separated by commas. Kept as a
+#                                    secret so a personal address is not
+#                                    published in this public repository.
+#   AWS_S3_BUCKET, AWS_REGION        optional — the S3 check is skipped
+#                                    without a bucket name
+#
+# Scheduled workflows only run from the default branch (main).
+
+on:
+  schedule:
+    - cron: "7 */6 * * *"                    # the 6-hourly check — keep the same as FULL_CHECK_CRON below
+    - cron: "7 1-5,7-11,13-17,19-23 * * *"   # hourly follow-up, only acts after a failure
+  workflow_dispatch:                          # "Run workflow" button — always checks
+
+permissions:
+  actions: read     # to read the result of the previous run
+  contents: read
+
+concurrency:
+  group: integration-check
+  cancel-in-progress: false
+
+env:
+  FULL_CHECK_CRON: "7 */6 * * *"
+  REPORT_TO: admin@nityasamagri.in   # gets every report; several addresses: separate with commas
+  WEB_URL:   https://nityasamagri.in
+  ADMIN_URL: https://adminns.in
+  API_URL:   https://api.adminns.in
+
+jobs:
+  check:
+    name: 🩺 Check servers and integrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ── 1. Is a check due this hour? ─────────────────────────────────────────
+      - name: Decide whether to check now
+        id: gate
+        env:
+          GH_TOKEN:       ${{ github.token }}
+          GH_REPO:        ${{ github.repository }}
+          EVENT_NAME:     ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          # Result of the last finished run of this workflow (this run is
+          # still in progress, so it is not in the list).
+          previous=$(gh run list --workflow integration-check.yml --status completed \
+                       --limit 1 --json conclusion --jq '.[0].conclusion // "none"' 2>/dev/null) \
+            || previous="unknown"
+
+          run=false
+          if [ "$EVENT_NAME" != "schedule" ]; then
+            run=true; reason="started by hand"
+          elif [ "$EVENT_SCHEDULE" = "$FULL_CHECK_CRON" ]; then
+            run=true; reason="6-hourly check"
+          elif [ "$previous" = "failure" ]; then
+            run=true; reason="hourly re-check, the last check failed"
+          elif [ "$previous" = "unknown" ]; then
+            run=true; reason="could not read the last result, checking to be safe"
+          else
+            reason="last check passed, next check at the 6-hour mark"
+          fi
+
+          echo "Previous run: $previous → check now: $run ($reason)"
+          echo "run=$run"           >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+
+      # ── 2. Run every check and write the report ──────────────────────────────
+      - name: Check servers and integrations
+        id: check
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          AWS_S3_BUCKET:      ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION:         ${{ secrets.AWS_REGION }}
+        run: |
+          set -uo pipefail
+          report=report.txt
+          : > "$report"
+          failed=0
+
+          ok()      { printf '  [ OK ]     %-20s %s\n' "$1" "$2" >> "$report"; }
+          bad()     { printf '  [ FAILED ] %-20s %s\n' "$1" "$2" >> "$report"; failed=$((failed + 1)); }
+          skipped() { printf '  [ SKIP ]   %-20s %s\n' "$1" "$2" >> "$report"; }
+          section() { printf '\n%s\n' "$1" >> "$report"; }
+
+          # HTTP status of a URL ("000" when there is no answer at all).
+          # Three tries, so one slow moment does not raise an alarm.
+          http_code() {
+            curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                 --retry 2 --retry-delay 5 --retry-all-errors "$@" || true
+          }
+
+          # One of our own pages: must load.
+          page() {
+            local code; code=$(http_code -L "$2")
+            case "$code" in
+              2??|3??) ok  "$1" "working (HTTP $code)" ;;
+              000)     bad "$1" "no answer from $2" ;;
+              *)       bad "$1" "HTTP $code from $2" ;;
+            esac
+          }
+
+          # A third-party server: any answer below 500 means it is up
+          # (401/403/404 are normal without login details).
+          reachable() {
+            local code; code=$(http_code "$2")
+            case "$code" in
+              000) bad "$1" "no answer from $2" ;;
+              5??) bad "$1" "server error (HTTP $code) from $2" ;;
+              *)   ok  "$1" "reachable (HTTP $code)" ;;
+            esac
+          }
+
+          # ── Our own servers ────────────────────────────────────────────────
+          section "OUR SERVERS"
+          page "Customer website" "$WEB_URL"
+          page "Admin panel"      "$ADMIN_URL"
+
+          body=$(curl -s --max-time 15 --retry 2 --retry-delay 5 --retry-all-errors "$API_URL/health" || true)
+          if printf '%s' "$body" | grep -q '"status":"ok"'; then
+            ok  "API server" "working"
+          else
+            bad "API server" "no healthy answer from $API_URL/health"
+          fi
+
+          # ── What the API itself can reach, with the real keys ──────────────
+          # /system/health logs in to each service using the keys on the
+          # server, so this proves the keys still work — not only that the
+          # service is online. It answers 503 when something critical fails.
+          section "CHECKED FROM THE API (real keys)"
+          deep=$(curl -s --max-time 30 "$API_URL/api/v1/system/health?verbose=1" || true)
+          if printf '%s' "$deep" | jq -e '.checks | type == "array"' > /dev/null 2>&1; then
+            while IFS='|' read -r name status detail; do
+              case "$name" in
+                mongodb)    label="MongoDB database" ;;
+                redis)      label="Redis cache" ;;
+                firebase)   label="Firebase Auth" ;;
+                razorpay)   label="Razorpay keys" ;;
+                jwt_config) label="Login token setup" ;;
+                *)          label="$name" ;;
+              esac
+              case "$status" in
+                ok)   ok      "$label" "working${detail:+ ($detail)}" ;;
+                fail) bad     "$label" "${detail:-failed}" ;;
+                *)    skipped "$label" "${detail:-not checked}" ;;
+              esac
+            done < <(printf '%s' "$deep" | jq -r '.checks[] | [
+                       .name, .status,
+                       ((.message // (if .latencyMs != null then "\(.latencyMs) ms" else "" end)) | gsub("[|\n\r]"; " "))
+                     ] | join("|")')
+          else
+            bad "API deep check" "no answer, so MongoDB, Redis, Firebase and Razorpay keys could not be tested"
+          fi
+
+          # ── Third-party services, checked directly ─────────────────────────
+          # Independent of our API, so the report can tell "their server is
+          # down" apart from "our server is down".
+          section "THIRD-PARTY SERVICES (checked directly)"
+          reachable "Razorpay"      "https://api.razorpay.com/v1/"
+          reachable "Eshopbox"      "https://wms.eshopbox.com/"
+          reachable "Firebase Auth" "https://identitytoolkit.googleapis.com/"
+
+          if [ -z "${GMAIL_USER:-}" ] || [ -z "${GMAIL_APP_PASSWORD:-}" ]; then
+            bad "Gmail SMTP" "GMAIL_USER / GMAIL_APP_PASSWORD secrets are not set in GitHub"
+          elif curl -s -o /dev/null --max-time 20 --retry 2 --retry-delay 5 \
+                    --url "smtps://smtp.gmail.com:465" \
+                    --user "${GMAIL_USER}:${GMAIL_APP_PASSWORD}"; then
+            ok  "Gmail SMTP" "login accepted"
+          else
+            bad "Gmail SMTP" "login to smtp.gmail.com failed (curl exit $?)"
+          fi
+
+          if [ -z "${AWS_S3_BUCKET:-}" ]; then
+            skipped "AWS S3 photos" "AWS_S3_BUCKET secret is not set in GitHub"
+          else
+            s3_url="https://${AWS_S3_BUCKET}.s3.${AWS_REGION:-ap-south-1}.amazonaws.com/"
+            code=$(http_code "$s3_url")
+            case "$code" in
+              200|403) ok  "AWS S3 photos" "bucket reachable (HTTP $code)" ;;
+              404)     bad "AWS S3 photos" "bucket not found" ;;
+              301)     bad "AWS S3 photos" "bucket is in a different region than AWS_REGION" ;;
+              000)     bad "AWS S3 photos" "no answer from S3" ;;
+              *)       bad "AWS S3 photos" "HTTP $code from S3" ;;
+            esac
+          fi
+
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+          cat "$report"
+          {
+            echo '### Integration check'
+            echo '```'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 3. Mail the report after every check ─────────────────────────────────
+      - name: Mail the report
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          FAILURE_ONLY_TO:    ${{ secrets.ALERT_EMAIL_FAILURE_ONLY }}
+          PREVIOUS:           ${{ steps.gate.outputs.previous }}
+          FAILED:             ${{ steps.check.outputs.failed }}
+          RUN_URL:            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GMAIL_USER:-}" ] || [ -z "${GMAIL_APP_PASSWORD:-}" ]; then
+            echo "❌ Cannot mail the report: add GMAIL_USER and GMAIL_APP_PASSWORD to the repository secrets."
+            exit 1
+          fi
+
+          # Success reports go to REPORT_TO; failure reports also go to the
+          # failure-only address(es).
+          to="${REPORT_TO}"
+          if [ "${FAILED:-}" != "0" ] && [ -n "${FAILURE_ONLY_TO:-}" ]; then
+            to="${to},${FAILURE_ONLY_TO}"
+          fi
+          when=$(TZ=Asia/Kolkata date '+%d %b %Y, %I:%M %p IST')
+          [ -s report.txt ] || echo "  The check did not finish — open the run log below." > report.txt
+
+          if [ "${FAILED:-}" = "0" ] && [ "${PREVIOUS:-}" = "failure" ]; then
+            subject="[Nitya Samagri] RECOVERED - all services are working"
+            intro="Everything is working again. Checks go back to once every 6 hours."
+          elif [ "${FAILED:-}" = "0" ]; then
+            subject="[Nitya Samagri] OK - all services are working"
+            intro="All checks passed. The next check is in 6 hours."
+          else
+            subject="[Nitya Samagri] ALERT - ${FAILED:-some} check(s) FAILED"
+            intro="Some checks failed. This check repeats every hour, with a mail each time, until everything works."
+          fi
+
+          {
+            echo "From: Nitya Samagri Monitor <${GMAIL_USER}>"
+            echo "To: ${to//,/, }"
+            echo "Subject: ${subject}"
+            echo "Date: $(date -R)"
+            echo "MIME-Version: 1.0"
+            echo "Content-Type: text/plain; charset=UTF-8"
+            echo
+            echo "${intro}"
+            echo
+            echo "Checked at: ${when}"
+            cat report.txt
+            echo
+            echo "Full log: ${RUN_URL}"
+          } > mail.txt
+
+          # One --mail-rcpt per address.
+          rcpts=()
+          IFS=',' read -ra addresses <<< "$to"
+          for address in "${addresses[@]}"; do
+            address=$(printf '%s' "$address" | xargs)
+            [ -n "$address" ] && rcpts+=(--mail-rcpt "$address")
+          done
+
+          curl -sS --max-time 60 --retry 2 --retry-delay 5 --crlf \
+               --url "smtps://smtp.gmail.com:465" \
+               --user "${GMAIL_USER}:${GMAIL_APP_PASSWORD}" \
+               --mail-from "${GMAIL_USER}" "${rcpts[@]}" \
+               --upload-file mail.txt
+
+          echo "✅ Report mailed."
+
+      # ── 4. Mark the run failed, so the next hour checks again ────────────────
+      - name: Fail the run when a check failed
+        if: always() && steps.gate.outputs.run == 'true' && steps.check.outputs.failed != '0'
+        run: |
+          echo "❌ ${{ steps.check.outputs.failed || 'Some' }} check(s) failed — see the report above. Re-checking every hour."
+          exit 1
