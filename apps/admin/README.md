@@ -23,7 +23,8 @@ npm run dev                  # http://localhost:3001
 ```
 
 Needs the `backend` API running and reachable at `NEXT_PUBLIC_API_URL`
-(defaults to `http://localhost:4000` if unset). From the repo root:
+(defaults to `http://localhost:4000` if unset; the value may end in
+`/api/v1` or not — `lib/apiBase.ts` handles both). From the repo root:
 
 ```bash
 docker compose -f devops/docker/docker-compose.dev.yml up -d api mongodb redis
@@ -154,11 +155,9 @@ All paths are under `/api/v1`.
 4. **Optional fields cannot be emptied on edit** (e.g. removing a coupon's
    end date): the update endpoints ignore missing values and do not accept
    `null`.
-5. **`lib/adminAuth.ts` and `lib/api.ts` build URLs differently.** Login
-   calls `${NEXT_PUBLIC_API_URL}/auth/login`, while everything else calls
-   `${NEXT_PUBLIC_API_URL}/api/v1/...`. Both cannot be right for the same
-   base URL unless a proxy rewrites one of them — worth checking against
-   the deployed Nginx config.
+5. ~~`lib/adminAuth.ts` and `lib/api.ts` build URLs differently.~~ Fixed:
+   both now go through `lib/apiBase.ts`, which accepts `NEXT_PUBLIC_API_URL`
+   with or without the `/api/v1` suffix and adds it exactly once.
 6. **No shared package between `apps/web` and `apps/admin`.** The fetch
    wrapper, theme values and formatting helpers are duplicated between the
    two apps rather than pulled from a shared workspace package.

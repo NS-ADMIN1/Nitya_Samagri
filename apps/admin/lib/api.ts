@@ -3,8 +3,7 @@
 // apps are independent Next.js projects (no shared package in this repo).
 
 import { getAdminSession, setAdminSession, clearAdminSession } from "./adminAuth";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+import { apiUrl } from "./apiBase";
 
 export class ApiError extends Error {
   status: number;
@@ -23,7 +22,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const { auth = true, skipRefresh = false, headers, ...rest } = options;
   const session = auth ? getAdminSession() : null;
 
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(apiUrl(path), {
     ...rest,
     headers: {
       "Content-Type": "application/json",
@@ -55,7 +54,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 async function tryRefresh(refreshToken: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/auth/refresh`, {
+    const res = await fetch(apiUrl("/auth/refresh"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refreshToken }),

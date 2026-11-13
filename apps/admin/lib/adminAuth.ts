@@ -7,8 +7,9 @@
 // else, so there's no separate "is this an admin" check needed here beyond
 // what the API already enforces.
 
+import { apiUrl } from "./apiBase";
+
 const SESSION_KEY = "nitya_admin_session";
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 export interface AdminUser {
   id: string;
@@ -57,7 +58,7 @@ export async function adminLogin(email: string, password: string): Promise<Admin
     throw new Error("Staff login requires an @adminns.in email address.");
   }
 
-  const res = await fetch(`${API_BASE}/auth/login`, {
+  const res = await fetch(apiUrl("/auth/login"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
