@@ -5,11 +5,22 @@
 import { Router } from "express";
 import { authenticate } from "../../middlewares/auth.middleware";
 import { validate } from "../../middlewares/validate.middleware";
-import { LoginSchema, OtpVerifySchema, RefreshSchema, RegisterSchema, UpdateProfileSchema } from "./auth.schema";
+import {
+  EmailOtpSendSchema,
+  EmailOtpVerifySchema,
+  LoginSchema,
+  OtpVerifySchema,
+  RefreshSchema,
+  RegisterSchema,
+  UpdateProfileSchema,
+} from "./auth.schema";
 import * as authController from "./auth.controller";
 
 const router = Router();
 
+// Sign-up needs a verified mobile (Firebase OTP) or a verified email (code below).
+router.post("/email-otp/send",   validate(EmailOtpSendSchema), authController.sendEmailOtp);
+router.post("/email-otp/verify", validate(EmailOtpVerifySchema), authController.verifyEmailOtp);
 router.post("/register",   validate(RegisterSchema), authController.register);
 router.post("/login",      validate(LoginSchema), authController.login);
 router.post("/otp/verify", validate(OtpVerifySchema), authController.verifyOtp);

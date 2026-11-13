@@ -6,6 +6,7 @@
 // Sessions: a short-lived access token (15 min) plus a refresh token that
 // is also kept in Redis. Deleting the Redis copy (revokeSessions) is how a
 // person is signed out — by logging out, or by being blocked.
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { User, IUser } from "../../database/models/User";
@@ -13,8 +14,10 @@ import { redis } from "../../config/redis";
 import { env } from "../../config/env";
 import { verifyOtpToken } from "../../config/firebase";
 import { effectivePermissions } from "../../config/permissions";
+import { sendEmail } from "../../integrations/mail";
 import { AppError } from "../../utils/AppError";
-import { LoginInput, RegisterInput, UpdateProfileInput } from "./auth.schema";
+import { logger } from "../../utils/logger";
+import { EmailOtpVerifyInput, LoginInput, RegisterInput, UpdateProfileInput } from "./auth.schema";
 
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_ATTEMPT_WINDOW_SECONDS = 15 * 60;
@@ -53,23 +56,143 @@ function publicUser(user: IUser) {
   return { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role };
 }
 
+// ── Email code (sign-up) ──────────────────────────────────────────────────────
+//
+// A customer who verifies by email gets a 6-digit code by email. Only a hash
+// of the code is kept in Redis. A correct code returns a short-lived
+// "emailToken" that /auth/register accepts as proof of the email address.
+
+const EMAIL_CODE_TTL_SECONDS    = 10 * 60;
+const EMAIL_CODE_RESEND_SECONDS = 30;
+const EMAIL_CODE_MAX_TRIES      = 5;
+const EMAIL_CODE_MAX_SENDS      = 5;       // per email address…
+const EMAIL_CODE_SENDS_WINDOW   = 60 * 60; // …per hour
+const EMAIL_PROOF_EXPIRES_IN    = "30m";
+
+const emailCodeKey  = (email: string) => `email_otp:${email}`;
+const emailTriesKey = (email: string) => `email_otp_tries:${email}`;
+const emailWaitKey  = (email: string) => `email_otp_wait:${email}`;
+const emailSendsKey = (email: string) => `email_otp_sends:${email}`;
+
+const hashEmailCode = (email: string, code: string) =>
+  crypto.createHash("sha256").update(`${email}:${code}`).digest("hex");
+
+// Its own signing key (derived from JWT_SECRET), so an email proof can never
+// be mistaken for a login token and vice versa.
+const emailProofSecret = () =>
+  crypto.createHmac("sha256", env.JWT_SECRET).update("email-verification").digest("hex");
+
+export async function sendEmailCode(email: string): Promise<void> {
+  if (env.NODE_ENV !== "development" && (!env.GMAIL_USER || !env.GMAIL_APP_PASSWORD)) {
+    throw new AppError("Email verification is not available right now. Please verify with your mobile number.", 503);
+  }
+  if (await User.exists({ email })) throw new AppError("Email already registered", 409);
+
+  // One code per 30 seconds…
+  const waitSet = await redis.set(emailWaitKey(email), "1", "EX", EMAIL_CODE_RESEND_SECONDS, "NX");
+  if (!waitSet) {
+    const ttl = await redis.ttl(emailWaitKey(email));
+    throw new AppError(`Please wait ${Math.max(1, ttl)} seconds before asking for a new code.`, 429);
+  }
+  // …and a few per hour, so nobody can flood an inbox.
+  const sends = await redis.incr(emailSendsKey(email));
+  if (sends === 1) await redis.expire(emailSendsKey(email), EMAIL_CODE_SENDS_WINDOW);
+  if (sends > EMAIL_CODE_MAX_SENDS) {
+    throw new AppError("Too many codes sent to this email. Please try again in an hour.", 429);
+  }
+
+  const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+  await redis.setex(emailCodeKey(email), EMAIL_CODE_TTL_SECONDS, hashEmailCode(email, code));
+  await redis.del(emailTriesKey(email));
+
+  try {
+    await sendEmail({
+      to: email,
+      subject: `${code} is your Nitya Samagri verification code`,
+      text: `Your Nitya Samagri verification code is ${code}. It expires in 10 minutes. If you did not ask for it, you can ignore this email.`,
+      html:
+        `<p>Your Nitya Samagri verification code is:</p>` +
+        `<p style="font-size:28px;font-weight:700;letter-spacing:6px;color:#071C42">${code}</p>` +
+        `<p>It expires in 10 minutes. If you did not ask for it, you can ignore this email.</p>`,
+    });
+  } catch (err) {
+    await redis.del(emailCodeKey(email), emailWaitKey(email));
+    logger.error(`Sign-up code email to ${email} failed: ${err instanceof Error ? err.message : err}`);
+    throw new AppError("We couldn't send the email. Please try again or verify with your mobile number.", 502);
+  }
+
+  // In development sendEmail() only logs, so show the code in the log.
+  if (env.NODE_ENV === "development") logger.info(`[EMAIL CODE] ${email}: ${code}`);
+}
+
+export async function verifyEmailCode({ email, code }: EmailOtpVerifyInput) {
+  const stored = await redis.get(emailCodeKey(email));
+  if (!stored) throw new AppError("That code has expired. Please ask for a new one.", 400);
+
+  const tries = await redis.incr(emailTriesKey(email));
+  if (tries === 1) await redis.expire(emailTriesKey(email), EMAIL_CODE_TTL_SECONDS);
+  if (tries > EMAIL_CODE_MAX_TRIES) {
+    await redis.del(emailCodeKey(email), emailTriesKey(email));
+    throw new AppError("Too many wrong codes. Please ask for a new one.", 429);
+  }
+
+  const given = Buffer.from(hashEmailCode(email, code));
+  if (given.length !== stored.length || !crypto.timingSafeEqual(given, Buffer.from(stored))) {
+    throw new AppError("That code is incorrect.", 400);
+  }
+
+  await redis.del(emailCodeKey(email), emailTriesKey(email));
+  const emailToken = jwt.sign({ email, type: "email_verified" }, emailProofSecret(), {
+    expiresIn: EMAIL_PROOF_EXPIRES_IN,
+  });
+  return { emailToken };
+}
+
+/** The email address an emailToken proves, or an error if it is not valid. */
+function readEmailProof(emailToken: string): string {
+  try {
+    const decoded = jwt.verify(emailToken, emailProofSecret(), { algorithms: ["HS256"] }) as {
+      email?: string;
+      type?: string;
+    };
+    if (decoded.type === "email_verified" && decoded.email) return decoded.email;
+  } catch {
+    // fall through
+  }
+  throw new AppError("Your email verification has expired. Please verify your email again.", 400);
+}
+
 // ── Sign-up ───────────────────────────────────────────────────────────────────
 
+/**
+ * Create a customer account. The mobile number (Firebase OTP) or the email
+ * (emailed code) must have been proven first; the new account is signed in.
+ */
 export async function register(input: RegisterInput) {
-  const { name, phone, email, password, idToken } = input;
+  const { name, phone, password, idToken, emailToken } = input;
+  const email = input.email?.toLowerCase();
 
-  // With an OTP token, the phone number is proven before the account exists.
-  let verified: { firebaseUid: string } | null = null;
+  let phoneProof: { firebaseUid: string } | null = null;
   if (idToken) {
     const otp = await verifyOtpToken(idToken);
     if (otp.phone !== phone) throw new AppError("The verified phone number does not match", 400);
-    verified = { firebaseUid: otp.firebaseUid };
+    phoneProof = { firebaseUid: otp.firebaseUid };
+  }
+
+  let emailVerified = false;
+  if (emailToken) {
+    if (!email || readEmailProof(emailToken) !== email) {
+      throw new AppError("The verified email does not match", 400);
+    }
+    emailVerified = true;
+  }
+
+  if (!phoneProof && !emailVerified) {
+    throw new AppError("Please verify your mobile number or email before creating an account.", 400);
   }
 
   if (await User.exists({ phone })) throw new AppError("Phone number already registered", 409);
-  if (email && (await User.exists({ email: email.toLowerCase() }))) {
-    throw new AppError("Email already registered", 409);
-  }
+  if (email && (await User.exists({ email }))) throw new AppError("Email already registered", 409);
 
   const user = await User.create({
     name,
@@ -77,12 +200,16 @@ export async function register(input: RegisterInput) {
     email,
     password: await bcrypt.hash(password, 12),
     role: "customer",
-    isVerified: !!verified,
-    firebaseUid: verified?.firebaseUid,
+    // isVerified stays about the phone: an email-verified account whose
+    // number was never proven still has its password cleared by the real
+    // owner's first OTP login (see loginWithOtp).
+    isVerified: !!phoneProof,
+    emailVerified,
+    firebaseUid: phoneProof?.firebaseUid,
     loyaltyPoints: WELCOME_POINTS,
   });
 
-  const tokens = verified ? await startSession(String(user._id), user.role) : undefined;
+  const tokens = await startSession(String(user._id), user.role);
   return { user: publicUser(user), ...tokens };
 }
 
@@ -147,9 +274,9 @@ export async function login(input: LoginInput) {
  * Sign in with a Firebase phone-OTP token. A new phone number gets a new
  * customer account.
  *
- * Proving the phone number also settles who owns an account that was only
- * ever registered with a password: sign-up does not check the phone, so
- * that password may have been set by someone else. The first OTP sign-in
+ * Proving the phone number also settles who owns an account whose phone was
+ * never proven (older password sign-ups, or sign-ups verified by email
+ * only): that password may have been set by someone else. The first OTP sign-in
  * therefore removes it, and the account continues with OTP login.
  */
 export async function loginWithOtp(idToken: string) {

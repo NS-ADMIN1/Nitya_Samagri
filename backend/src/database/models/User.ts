@@ -15,7 +15,10 @@ export interface IUser extends Document {
   roleTemplate?: Types.ObjectId; // which Role template this was last set up from, for display only
   invitedBy?: Types.ObjectId;
   status: "active" | "blocked";
+  /** The phone number has been proven with a Firebase OTP. */
   isVerified: boolean;
+  /** The email address has been proven with an emailed sign-up code. */
+  emailVerified: boolean;
   loyaltyPoints: number;
   loyaltyTier: "bronze" | "silver" | "gold" | "platinum";
   googleId?: string;
@@ -38,6 +41,7 @@ const userSchema = new Schema<IUser>(
     invitedBy: { type: Schema.Types.ObjectId, ref: "User" },
     status: { type: String, enum: ["active", "blocked"], default: "active", index: true },
     isVerified: { type: Boolean, default: false },
+    emailVerified: { type: Boolean, default: false },
     loyaltyPoints: { type: Number, default: 0 },
     loyaltyTier: { type: String, enum: ["bronze", "silver", "gold", "platinum"], default: "bronze" },
     googleId: { type: String, index: true, sparse: true },

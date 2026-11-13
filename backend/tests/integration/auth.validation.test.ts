@@ -41,6 +41,51 @@ describe("POST /api/v1/auth/register", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("rejects a sign-up with neither the mobile nor the email verified", async () => {
+    const res = await request(app).post("/api/v1/auth/register").send({
+      name: "Test User",
+      phone: "+919876543210",
+      email: "test@example.com",
+      password: "password123",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: "verification" })])
+    );
+  });
+
+  it("rejects an email proof without the email address", async () => {
+    const res = await request(app).post("/api/v1/auth/register").send({
+      name: "Test User",
+      phone: "+919876543210",
+      password: "password123",
+      emailToken: "some-token",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: "email" })])
+    );
+  });
+});
+
+describe("POST /api/v1/auth/email-otp", () => {
+  it("rejects sending a code to an invalid email with 400", async () => {
+    const res = await request(app).post("/api/v1/auth/email-otp/send").send({ email: "not-an-email" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a code that is not 6 digits with 400", async () => {
+    const res = await request(app)
+      .post("/api/v1/auth/email-otp/verify")
+      .send({ email: "test@example.com", code: "12ab" });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: "code" })])
+    );
+  });
 });
 
 describe("POST /api/v1/auth/login", () => {

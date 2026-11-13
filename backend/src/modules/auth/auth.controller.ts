@@ -6,11 +6,19 @@ import * as authService from "./auth.service";
 // POST /api/v1/auth/register
 export const register = asyncHandler(async (req: Request, res: Response) => {
   const data = await authService.register(req.body);
-  res.status(201).json({
-    success: true,
-    message: data.accessToken ? "Registration successful." : "Registration successful. Please verify your phone number.",
-    data,
-  });
+  res.status(201).json({ success: true, message: "Registration successful.", data });
+});
+
+// POST /api/v1/auth/email-otp/send
+export const sendEmailOtp = asyncHandler(async (req: Request, res: Response) => {
+  await authService.sendEmailCode(req.body.email);
+  res.json({ success: true, message: "We've sent a 6-digit code to your email." });
+});
+
+// POST /api/v1/auth/email-otp/verify
+export const verifyEmailOtp = asyncHandler(async (req: Request, res: Response) => {
+  const data = await authService.verifyEmailCode(req.body);
+  res.json({ success: true, data });
 });
 
 // POST /api/v1/auth/login

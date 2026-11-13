@@ -326,7 +326,9 @@ Authorization: Bearer <access_token>
  
 ### Auth Endpoints
 ```
-POST   /auth/register          Register new user
+POST   /auth/email-otp/send    Email a 6-digit sign-up code
+POST   /auth/email-otp/verify  Check the code, get an emailToken
+POST   /auth/register          Register new user (needs a verified mobile idToken OR an emailToken)
 POST   /auth/login             Login with phone + password
 POST   /auth/otp/request       Request OTP (rate limited: 3/10min)
 POST   /auth/otp/verify        Verify OTP and get tokens
