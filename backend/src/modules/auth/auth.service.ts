@@ -220,7 +220,10 @@ export function logout(userId: string) {
 
 const PROFILE_FIELDS = "name phone email role isVerified loyaltyPoints loyaltyTier createdAt lastLoginAt permissions";
 
-export async function getProfile(userId: string) {
+// The return type is written out (as plain `object`) because the build also
+// writes type files, and TypeScript cannot write out the very long type it
+// would otherwise work out for a database record.
+export async function getProfile(userId: string): Promise<object> {
   const user = await User.findById(userId).select(PROFILE_FIELDS).lean();
   if (!user) throw new AppError("User not found", 404);
 
@@ -231,7 +234,7 @@ export async function getProfile(userId: string) {
 }
 
 /** A person edits their own name or email. Staff emails are their login, so those stay fixed. */
-export async function updateProfile(userId: string, input: UpdateProfileInput) {
+export async function updateProfile(userId: string, input: UpdateProfileInput): Promise<object> {
   const user = await User.findById(userId);
   if (!user) throw new AppError("User not found", 404);
 

@@ -10,7 +10,7 @@ import { revokeSessions } from "../auth/auth.service";
 import { CustomerListQuery } from "./customer.schema";
 
 /** One page of customers, each with their paid-order count, spend and last order date. */
-export async function listCustomers(query: CustomerListQuery) {
+export async function listCustomers(query: CustomerListQuery): Promise<{ users: object[]; total: number }> {
   const filter: Record<string, unknown> = { role: "customer" };
   if (query.q) {
     const text = escapeRegex(query.q.trim());

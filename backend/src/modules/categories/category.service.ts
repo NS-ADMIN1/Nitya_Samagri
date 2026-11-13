@@ -9,7 +9,7 @@ import { CategoryCreateInput, CategoryUpdateInput } from "./category.schema";
  * Active categories, each with a live count of its active products. The
  * counts come from one aggregation rather than a query per category.
  */
-export async function listActiveCategories() {
+export async function listActiveCategories(): Promise<object[]> { // plain `object`: see the note in auth.service.ts getProfile
   const [categories, counts] = await Promise.all([
     Category.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).lean(),
     Product.aggregate([

@@ -226,7 +226,7 @@ export async function listMyOrders(userId: string, query: MyOrdersQuery) {
 }
 
 /** One order with its items and timeline. Customers can only open their own. */
-export async function getOrder(orderId: string, viewer: { userId: string; role: string }) {
+export async function getOrder(orderId: string, viewer: { userId: string; role: string }): Promise<object> {
   const filter: Record<string, unknown> = { orderId };
   if (!ORDER_STAFF_ROLES.includes(viewer.role)) filter.userId = viewer.userId;
 
