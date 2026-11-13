@@ -1,0 +1,234 @@
+name: 🛠️ Manual · MongoDB
+
+# Run by hand only: Actions → "🛠️ Manual · MongoDB" → Run workflow.
+# Use it when the Integration Check mail says "MongoDB database" failed.
+#
+#   check       look only — ping, size, open connections
+#   backup-now  take a backup to S3 now, runs backup.sh   (needs CONFIRM)
+#   restart     restart the MongoDB container             (needs CONFIRM)
+#
+# A fix always runs the check first. Without CONFIRM typed in the confirm
+# box it stops after the check and changes nothing.
+#
+# Take a backup BEFORE a restart whenever the check still passes.
+# A restart stops the store for a few seconds.
+#
+# Secrets used: SERVER_HOST, SERVER_USER, SERVER_SSH_KEY
+#   backup-now also uses AWS_S3_BUCKET, AWS_REGION and, when they are set,
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (same as Scheduled Maintenance).
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        default: check
+        options: [check, backup-now, restart]
+      confirm:
+        description: "Type CONFIRM to allow backup-now / restart"
+        default: ""
+
+run-name: "MongoDB · ${{ inputs.action }}"
+
+permissions:
+  contents: read
+
+# One manual tool at a time on the server.
+concurrency:
+  group: manual-server-tools
+  cancel-in-progress: false
+
+jobs:
+  mongodb:
+    name: 🗄️ MongoDB · ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Connect to the server
+        env:
+          SERVER_HOST:    ${{ secrets.SERVER_HOST }}
+          SERVER_USER:    ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_USER" ] || [ -z "$SERVER_SSH_KEY" ]; then
+            echo "❌ Add SERVER_HOST, SERVER_USER and SERVER_SSH_KEY to the repository secrets."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/server_key && chmod 600 ~/.ssh/server_key
+          cat > ~/.ssh/config <<EOF
+          Host server
+            HostName $SERVER_HOST
+            User $SERVER_USER
+            IdentityFile ~/.ssh/server_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          ssh server true && echo "✅ Connected to the server."
+
+      - name: MongoDB — ${{ inputs.action }}
+        env:
+          ACTION:                ${{ inputs.action }}
+          CONFIRM:               ${{ inputs.confirm }}
+          AWS_S3_BUCKET:         ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION:            ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            # Sent inside the script, so the values never show in a process list.
+            printf 'export ACTION=%q CONFIRM=%q\n' "$ACTION" "$CONFIRM"
+            printf 'export BACKUP_BUCKET=%q BACKUP_REGION=%q BACKUP_KEY_ID=%q BACKUP_KEY_SECRET=%q\n' \
+                   "$AWS_S3_BUCKET" "$AWS_REGION" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+            cat <<'REMOTE'
+          set -uo pipefail
+          failed=0
+          ok()      { printf '  [ OK ]     %-20s %s\n' "$1" "$2"; }
+          bad()     { printf '  [ FAILED ] %-20s %s\n' "$1" "$2"; failed=$((failed + 1)); }
+          info()    { printf '  [ INFO ]   %-20s %s\n' "$1" "$2"; }
+          section() { printf '\n%s\n' "$1"; }
+
+          cd ~/Nitya_Samagri 2>/dev/null || { bad "Server" "folder ~/Nitya_Samagri not found"; exit 1; }
+          ACTIVE=$(cat .active_color 2>/dev/null || echo blue)
+          API="nityasamagri_api_$ACTIVE"
+          M="nityasamagri_mongodb"
+
+          state() {
+            local s
+            s=$(docker inspect -f '{{.State.Status}}{{if .State.Health}} {{.State.Health.Status}}{{end}}' "$1" 2>/dev/null | head -n 1)
+            echo "${s:-missing}"
+          }
+          wait_up() {
+            local i
+            for i in $(seq 1 40); do
+              case "$(state "$1")" in running|"running healthy") return 0 ;; esac
+              sleep 3
+            done
+            return 1
+          }
+          # A fix is only allowed with CONFIRM typed in the confirm box.
+          need_confirm() {
+            [ "$CONFIRM" = "CONFIRM" ] && return 0
+            section "NOT DONE"
+            echo "  '$ACTION' changes the live server, so nothing was changed."
+            echo "  To allow it, run again and type CONFIRM in the confirm box."
+            exit 1
+          }
+
+          # Runs a small script inside the database container, logged in with
+          # the container's own user and password (never printed).
+          mongo_eval() {
+            docker exec "$M" sh -c 'mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin nityasamagri --eval "$1"' sh "$1" 2>&1
+          }
+          value() { printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key { print $2 }'; }
+
+          # What the running API itself says about a service (its /system/health).
+          api_sees() {
+            local out detail
+            out=$(docker exec -e NAME="$2" "$API" node -e '
+              fetch("http://localhost:" + (process.env.PORT || 4000) + "/api/v1/system/health?verbose=1")
+                .then((r) => r.json())
+                .then((j) => {
+                  const c = (j.checks || []).find((x) => x.name === process.env.NAME);
+                  if (!c) return console.log("fail|not in the API health report");
+                  console.log(c.status + "|" + (c.message || (c.latencyMs != null ? c.latencyMs + " ms" : "")));
+                })
+                .catch((e) => console.log("fail|the API did not answer: " + e.message));' 2>/dev/null) \
+              || out="fail|API container $API is not running"
+            detail="${out#*|}"
+            case "${out%%|*}" in
+              ok) ok  "$1" "working${detail:+ ($detail)}" ;;
+              *)  bad "$1" "${detail:-failed}" ;;
+            esac
+          }
+
+          check() {
+            section "MONGODB"
+            case "$(state "$M")" in
+              running|"running healthy") ok "Container" "$(state "$M")" ;;
+              *) bad "Container" "$(state "$M")  (container $M)"; return ;;
+            esac
+
+            out=$(mongo_eval '
+              const s = db.stats(1048576), c = db.serverStatus().connections;
+              print("ping=" + db.adminCommand({ ping: 1 }).ok);
+              print("collections=" + s.collections);
+              print("documents=" + s.objects);
+              print("data=" + Math.round(s.dataSize) + " MB");
+              print("disk=" + Math.round(s.storageSize + s.indexSize) + " MB");
+              print("connections=" + c.current + " open, " + c.available + " free");')
+
+            if [ "$(value "$out" ping)" = "1" ]; then
+              ok   "Login and ping" "working"
+              info "Collections"    "$(value "$out" collections)"
+              info "Documents"      "$(value "$out" documents)"
+              info "Data size"      "$(value "$out" data)"
+              info "Size on disk"   "$(value "$out" disk)"
+              info "Connections"    "$(value "$out" connections)"
+            else
+              bad  "Login and ping" "$(printf '%s' "$out" | tail -n 1)"
+            fi
+
+            section "SEEN FROM THE API"
+            api_sees "MongoDB database" mongodb
+          }
+
+          check
+
+          case "$ACTION" in
+            backup-now)
+              need_confirm
+              section "BACKUP NOW (devops/scripts/backup.sh)"
+              # Database login: the container's own. Bucket: the GitHub secret,
+              # or the bucket the API uses when the secret is not set.
+              export MONGO_ROOT_USER=$(docker exec "$M" printenv MONGO_INITDB_ROOT_USERNAME 2>/dev/null)
+              export MONGO_ROOT_PASSWORD=$(docker exec "$M" printenv MONGO_INITDB_ROOT_PASSWORD 2>/dev/null)
+              export AWS_S3_BUCKET="${BACKUP_BUCKET:-$(docker exec "$API" printenv AWS_S3_BUCKET 2>/dev/null)}"
+              export AWS_REGION="${BACKUP_REGION:-$(docker exec "$API" printenv AWS_REGION 2>/dev/null)}"
+              if [ -n "$BACKUP_KEY_ID" ] && [ -n "$BACKUP_KEY_SECRET" ]; then
+                export AWS_ACCESS_KEY_ID="$BACKUP_KEY_ID" AWS_SECRET_ACCESS_KEY="$BACKUP_KEY_SECRET"
+              fi
+
+              if ! command -v aws > /dev/null 2>&1; then
+                bad "Backup" "the 'aws' program is not installed on the server"
+              elif [ -z "$AWS_S3_BUCKET" ] || [ -z "$AWS_REGION" ]; then
+                bad "Backup" "AWS_S3_BUCKET / AWS_REGION are not set in the GitHub secrets"
+              elif COMPOSE_DIR="devops/docker" bash devops/scripts/backup.sh 2>&1 | sed 's/^/  /'; then
+                ok  "Backup" "saved to S3, folder backups/"
+              else
+                bad "Backup" "backup.sh stopped with an error — see the lines above"
+              fi
+              ;;
+
+            restart)
+              need_confirm
+              failed=0
+              section "RESTART"
+              if docker restart "$M" > /dev/null 2>&1 && wait_up "$M"; then
+                ok "MongoDB" "restarted, now $(state "$M")"
+                sleep 10   # give the API a moment to connect again
+                api_sees "MongoDB database" mongodb
+              else
+                bad "MongoDB" "did not come back: $(state "$M") — use Manual · Docker, action 'logs', service 'mongodb'"
+              fi
+              ;;
+          esac
+
+          [ "$failed" -eq 0 ]
+          REMOTE
+          } | ssh server bash -s 2>&1 | tee report.txt
+
+      - name: Show the report
+        if: always()
+        run: |
+          {
+            echo '### MongoDB'
+            echo '```'
+            cat report.txt 2>/dev/null || echo "No report — open the log of the step above."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

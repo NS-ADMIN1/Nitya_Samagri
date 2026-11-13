@@ -1,0 +1,210 @@
+name: 🛠️ Manual · Razorpay
+
+# Run by hand only: Actions → "🛠️ Manual · Razorpay" → Run workflow.
+# Use it when payments fail, orders stay "unpaid" after the customer paid,
+# or the Integration Check mail says "Razorpay keys" failed.
+#
+#   check    tests the Razorpay keys the live API is using (a real login to
+#            Razorpay) and that the payment webhook address answers
+#   look-up  shows the status of ONE payment, order or refund at Razorpay —
+#            type its id (pay_..., order_... or rfnd_...)
+#
+# This workflow only looks. It never changes a payment, an order or a key.
+# Key values are never printed, and a look-up shows no customer details.
+#
+# To change a key: edit backend/.env on the server, then restart the API
+# with Manual · Docker (action restart, service api).
+#
+# Secrets used: SERVER_HOST, SERVER_USER, SERVER_SSH_KEY
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        default: check
+        options: [check, look-up]
+      id:
+        description: "Only for look-up — Razorpay id (pay_..., order_... or rfnd_...)"
+        default: ""
+
+run-name: "Razorpay · ${{ inputs.action }}"
+
+permissions:
+  contents: read
+
+# One manual tool at a time on the server.
+concurrency:
+  group: manual-server-tools
+  cancel-in-progress: false
+
+env:
+  API_URL: https://api.adminns.in
+
+jobs:
+  razorpay:
+    name: 💳 Razorpay · ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to the server
+        env:
+          SERVER_HOST:    ${{ secrets.SERVER_HOST }}
+          SERVER_USER:    ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_USER" ] || [ -z "$SERVER_SSH_KEY" ]; then
+            echo "❌ Add SERVER_HOST, SERVER_USER and SERVER_SSH_KEY to the repository secrets."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/server_key && chmod 600 ~/.ssh/server_key
+          cat > ~/.ssh/config <<EOF
+          Host server
+            HostName $SERVER_HOST
+            User $SERVER_USER
+            IdentityFile ~/.ssh/server_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          ssh server true && echo "✅ Connected to the server."
+
+      - name: Razorpay — ${{ inputs.action }}
+        env:
+          ACTION:    ${{ inputs.action }}
+          LOOKUP_ID: ${{ inputs.id }}
+        run: |
+          if [ "$ACTION" = "look-up" ] && ! [[ "$LOOKUP_ID" =~ ^(pay|order|rfnd)_[A-Za-z0-9]{6,30}$ ]]; then
+            echo "❌ For look-up, type a Razorpay id that starts with pay_, order_ or rfnd_."
+            exit 1
+          fi
+
+          {
+            printf 'export ACTION=%q LOOKUP_ID=%q API_URL=%q\n' "$ACTION" "$LOOKUP_ID" "$API_URL"
+            cat <<'REMOTE'
+          set -uo pipefail
+          cd ~/Nitya_Samagri 2>/dev/null || { echo "  [ FAILED ] Server               folder ~/Nitya_Samagri not found"; exit 1; }
+          ACTIVE=$(cat .active_color 2>/dev/null || echo blue)
+          API="nityasamagri_api_$ACTIVE"
+
+          if [ "$(docker inspect -f '{{.State.Status}}' "$API" 2>/dev/null)" != "running" ]; then
+            echo "  [ FAILED ] API container        $API is not running, so its keys cannot be tested."
+            echo "             Start it first with Manual · Docker (action restart, service api)."
+            exit 1
+          fi
+
+          # Runs inside the live API container, so it uses exactly the keys
+          # the store is using right now.
+          docker exec -i -e ACTION -e LOOKUP_ID -e API_URL "$API" node - <<'JS'
+          let failed = 0;
+          const row     = (tag, name, text) => console.log(`  ${tag.padEnd(10)} ${name.padEnd(20)} ${text}`);
+          const ok      = (name, text) => row("[ OK ]", name, text);
+          const info    = (name, text) => row("[ INFO ]", name, text);
+          const bad     = (name, text) => { row("[ FAILED ]", name, text); failed++; };
+          const section = (title) => console.log(`\n${title}`);
+
+          const { RAZORPAY_KEY_ID: keyId, RAZORPAY_KEY_SECRET: keySecret, RAZORPAY_WEBHOOK_SECRET: webhookSecret,
+                  ACTION, LOOKUP_ID, API_URL } = process.env;
+          const auth = "Basic " + Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+
+          async function razorpay(path) {
+            const res  = await fetch(`https://api.razorpay.com/v1${path}`, {
+              headers: { Authorization: auth },
+              signal:  AbortSignal.timeout(15000),
+            });
+            const body = await res.json().catch(() => ({}));
+            return { code: res.status, body, error: body.error?.description || `HTTP ${res.status}` };
+          }
+          const rupees = (paise) => `Rs ${(Number(paise || 0) / 100).toFixed(2)}`;
+          const when   = (seconds) =>
+            new Date(seconds * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" }) + " IST";
+
+          async function check() {
+            section("RAZORPAY KEYS (the ones the live API is using)");
+            if (!keyId || !keySecret) {
+              bad("Keys", "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not set in backend/.env");
+            } else {
+              if (keyId.startsWith("rzp_live_"))      ok("Mode", "LIVE keys — real money");
+              else if (keyId.startsWith("rzp_test_")) bad("Mode", "TEST keys — customers cannot pay real money with these");
+              else                                    bad("Mode", "RAZORPAY_KEY_ID does not look like a Razorpay key (rzp_live_...)");
+              try {
+                const r = await razorpay("/payments?count=1");
+                if (r.code === 200)      ok("Login to Razorpay", "keys accepted");
+                else if (r.code === 401) bad("Login to Razorpay", "Razorpay REJECTED the keys — the key id and secret do not match, or the key was deleted");
+                else                     bad("Login to Razorpay", r.error);
+              } catch (e) {
+                bad("Login to Razorpay", `could not reach api.razorpay.com (${e.message})`);
+              }
+            }
+
+            section("PAYMENT WEBHOOK (how Razorpay tells the store 'paid')");
+            if (webhookSecret) ok("Webhook secret", "set — it must be the same as in the Razorpay dashboard");
+            else               bad("Webhook secret", "RAZORPAY_WEBHOOK_SECRET is not set, so every 'paid' message is refused");
+
+            // A message without Razorpay's signature must be refused (HTTP 400).
+            const url = `${API_URL}/api/v1/payments/webhook`;
+            try {
+              const res = await fetch(url, {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+                signal: AbortSignal.timeout(15000),
+              });
+              if (res.status === 400)                       ok("Webhook address", `answers and refuses unsigned messages (${url})`);
+              else if (res.status >= 200 && res.status < 300) bad("Webhook address", "ACCEPTED a message without a signature — anyone could mark orders paid");
+              else                                          bad("Webhook address", `HTTP ${res.status} from ${url}`);
+            } catch (e) {
+              bad("Webhook address", `no answer from ${url} (${e.message})`);
+            }
+          }
+
+          async function lookUp() {
+            section(`RAZORPAY RECORD ${LOOKUP_ID}`);
+            const kind = LOOKUP_ID.startsWith("pay_") ? "payments" : LOOKUP_ID.startsWith("order_") ? "orders" : "refunds";
+            let r;
+            try {
+              r = await razorpay(`/${kind}/${LOOKUP_ID}`);
+            } catch (e) {
+              return bad("Look-up", `could not reach api.razorpay.com (${e.message})`);
+            }
+            if (r.code === 401) return bad("Look-up", "Razorpay rejected the keys — run this workflow with action 'check'");
+            if (r.code !== 200) return bad("Look-up", `${r.error} — check the id and that it belongs to this mode (live/test)`);
+
+            const x = r.body;
+            info("Status", String(x.status));
+            info("Amount", rupees(x.amount));
+            if (kind === "payments") {
+              info("Method",   String(x.method || "-"));
+              info("Captured", x.captured ? "yes — money received" : "no");
+              info("Refunded", rupees(x.amount_refunded));
+              info("Order id", String(x.order_id || "-"));
+              if (x.error_description) info("Failure reason", x.error_description);
+            } else if (kind === "orders") {
+              info("Paid",     rupees(x.amount_paid));
+              info("Due",      rupees(x.amount_due));
+              info("Attempts", String(x.attempts));
+              info("Receipt",  String(x.receipt || "-"));
+            } else {
+              info("Payment id", String(x.payment_id || "-"));
+            }
+            info("Created", when(x.created_at));
+          }
+
+          (ACTION === "look-up" ? lookUp() : check())
+            .catch((e) => bad("Razorpay", e.message))
+            .finally(() => process.exit(failed ? 1 : 0));
+          JS
+          REMOTE
+          } | ssh server bash -s 2>&1 | tee report.txt
+
+      - name: Show the report
+        if: always()
+        run: |
+          {
+            echo '### Razorpay'
+            echo '```'
+            cat report.txt 2>/dev/null || echo "No report — open the log of the step above."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

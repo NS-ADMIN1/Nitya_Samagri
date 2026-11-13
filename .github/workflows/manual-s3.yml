@@ -1,0 +1,158 @@
+name: 🛠️ Manual · AWS S3 (photos)
+
+# Run by hand only: Actions → "🛠️ Manual · AWS S3 (photos)" → Run workflow.
+# Use it when product photos cannot be uploaded from the admin panel.
+#
+# It uses the AWS keys and bucket the live API is using and does what a
+# photo upload does: saves one small text file, reads it back, deletes it.
+# The file is always manual-check/connection-test.txt — no photo is touched.
+# Nothing on the server is changed and no key value is printed.
+#
+# To change a key: edit backend/.env on the server, then restart the API
+# with Manual · Docker (action restart, service api).
+#
+# Secrets used: SERVER_HOST, SERVER_USER, SERVER_SSH_KEY
+
+on:
+  workflow_dispatch:
+
+run-name: "AWS S3 · check"
+
+permissions:
+  contents: read
+
+# One manual tool at a time on the server.
+concurrency:
+  group: manual-server-tools
+  cancel-in-progress: false
+
+jobs:
+  s3:
+    name: 🖼️ AWS S3 · check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to the server
+        env:
+          SERVER_HOST:    ${{ secrets.SERVER_HOST }}
+          SERVER_USER:    ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_USER" ] || [ -z "$SERVER_SSH_KEY" ]; then
+            echo "❌ Add SERVER_HOST, SERVER_USER and SERVER_SSH_KEY to the repository secrets."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/server_key && chmod 600 ~/.ssh/server_key
+          cat > ~/.ssh/config <<EOF
+          Host server
+            HostName $SERVER_HOST
+            User $SERVER_USER
+            IdentityFile ~/.ssh/server_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          ssh server true && echo "✅ Connected to the server."
+
+      - name: AWS S3 — check
+        run: |
+          {
+            cat <<'REMOTE'
+          set -uo pipefail
+          cd ~/Nitya_Samagri 2>/dev/null || { echo "  [ FAILED ] Server               folder ~/Nitya_Samagri not found"; exit 1; }
+          ACTIVE=$(cat .active_color 2>/dev/null || echo blue)
+          API="nityasamagri_api_$ACTIVE"
+
+          if [ "$(docker inspect -f '{{.State.Status}}' "$API" 2>/dev/null)" != "running" ]; then
+            echo "  [ FAILED ] API container        $API is not running, so its keys cannot be tested."
+            echo "             Start it first with Manual · Docker (action restart, service api)."
+            exit 1
+          fi
+
+          # Runs inside the live API container, so it uses exactly the keys
+          # and the signing code the store is using right now.
+          docker exec -i "$API" node - <<'JS'
+          let failed = 0;
+          const row  = (tag, name, text) => console.log(`  ${tag.padEnd(10)} ${name.padEnd(20)} ${text}`);
+          const ok   = (name, text) => row("[ OK ]", name, text);
+          const info = (name, text) => row("[ INFO ]", name, text);
+          const bad  = (name, text) => { row("[ FAILED ]", name, text); failed++; };
+
+          const { AWS_ACCESS_KEY_ID: accessKeyId, AWS_SECRET_ACCESS_KEY: secretAccessKey,
+                  AWS_REGION: region, AWS_S3_BUCKET: bucket } = process.env;
+
+          // What S3's error codes mean, in plain words.
+          const REASONS = {
+            InvalidAccessKeyId:    "AWS does not know this AWS_ACCESS_KEY_ID — the key was deleted or mistyped",
+            SignatureDoesNotMatch: "AWS_SECRET_ACCESS_KEY does not belong to this AWS_ACCESS_KEY_ID",
+            AccessDenied:          "the key is valid but is not allowed to do this on the bucket (check its IAM policy)",
+            NoSuchBucket:          "the bucket in AWS_S3_BUCKET does not exist",
+            PermanentRedirect:     "the bucket is in a different region than AWS_REGION",
+            AuthorizationQueryParametersError: "AWS_REGION is not the bucket's region",
+          };
+          async function reason(res) {
+            const code = ((await res.text().catch(() => "")).match(/<Code>([^<]+)<\/Code>/) || [])[1];
+            return `HTTP ${res.status}${code ? ` ${code}` : ""}${REASONS[code] ? ` — ${REASONS[code]}` : ""}`;
+          }
+
+          async function check() {
+            console.log("\nAWS S3 PHOTO STORAGE (the keys the live API is using)");
+
+            const missing = Object.entries({ AWS_ACCESS_KEY_ID: accessKeyId, AWS_SECRET_ACCESS_KEY: secretAccessKey, AWS_REGION: region, AWS_S3_BUCKET: bucket })
+              .filter(([, value]) => !value).map(([name]) => name);
+            if (missing.length) return bad("Settings", `not set in backend/.env: ${missing.join(", ")}`);
+            info("Bucket", `${bucket} (${region})`);
+
+            let presignUrl;
+            try {
+              ({ presignUrl } = require("./dist/integrations/s3"));
+            } catch (e) {
+              return bad("API version", e.code === "MODULE_NOT_FOUND"
+                ? "the API on the server has no photo-upload code yet — deploy the latest backend first"
+                : `the API's photo-upload code did not load (${e.message})`);
+            }
+
+            const host = `${bucket}.s3.${region}.amazonaws.com`;
+            const key  = "manual-check/connection-test.txt";
+            const text = `Nitya Samagri S3 check ${new Date().toISOString()}`;
+            const type = "text/plain";
+            const link = (method, headers) =>
+              presignUrl({ method, host, key, region, accessKeyId, secretAccessKey, expiresIn: 120, headers });
+            const send = (url, init = {}) => fetch(url, { ...init, signal: AbortSignal.timeout(20000) });
+
+            // 1. Save — the same signed link the admin panel uploads photos with
+            const put = await send(link("PUT", { "content-type": type }), { method: "PUT", headers: { "content-type": type }, body: text });
+            if (!put.ok) return bad("Save a file", await reason(put));
+            ok("Save a file", "working — photo uploads can be stored");
+
+            // 2. Read it back
+            const get = await send(link("GET"));
+            if (get.ok && (await get.text()) === text) ok("Read it back", "working");
+            else                                       bad("Read it back", get.ok ? "the file came back changed" : await reason(get));
+
+            // 3. Delete the test file again
+            const del = await send(link("DELETE"), { method: "DELETE" });
+            if (del.ok)                  ok("Delete test file", "done — nothing is left in the bucket");
+            else if (del.status === 403) info("Delete test file", `this key may not delete, so the small file ${key} stays (each run reuses it)`);
+            else                         bad("Delete test file", await reason(del));
+          }
+
+          check()
+            .catch((e) => bad("AWS S3", `could not reach S3 (${e.message})`))
+            .finally(() => process.exit(failed ? 1 : 0));
+          JS
+          REMOTE
+          } | ssh server bash -s 2>&1 | tee report.txt
+
+      - name: Show the report
+        if: always()
+        run: |
+          {
+            echo '### AWS S3 (photos)'
+            echo '```'
+            cat report.txt 2>/dev/null || echo "No report — open the log of the step above."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

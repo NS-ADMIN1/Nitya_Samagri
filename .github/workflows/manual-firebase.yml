@@ -1,0 +1,129 @@
+name: 🛠️ Manual · Firebase
+
+# Run by hand only: Actions → "🛠️ Manual · Firebase" → Run workflow.
+# Use it when customers cannot log in with OTP, or the Integration Check
+# mail says "Firebase Auth" failed.
+#
+# It tests the Firebase service-account keys the live API is using, with a
+# real login to Firebase. It only looks — nothing is changed, no key value
+# is printed and no user is listed.
+#
+# To change a key: edit backend/.env on the server, then restart the API
+# with Manual · Docker (action restart, service api).
+#
+# Secrets used: SERVER_HOST, SERVER_USER, SERVER_SSH_KEY
+
+on:
+  workflow_dispatch:
+
+run-name: "Firebase · check"
+
+permissions:
+  contents: read
+
+# One manual tool at a time on the server.
+concurrency:
+  group: manual-server-tools
+  cancel-in-progress: false
+
+jobs:
+  firebase:
+    name: 🔥 Firebase · check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to the server
+        env:
+          SERVER_HOST:    ${{ secrets.SERVER_HOST }}
+          SERVER_USER:    ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_USER" ] || [ -z "$SERVER_SSH_KEY" ]; then
+            echo "❌ Add SERVER_HOST, SERVER_USER and SERVER_SSH_KEY to the repository secrets."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/server_key && chmod 600 ~/.ssh/server_key
+          cat > ~/.ssh/config <<EOF
+          Host server
+            HostName $SERVER_HOST
+            User $SERVER_USER
+            IdentityFile ~/.ssh/server_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          ssh server true && echo "✅ Connected to the server."
+
+      - name: Firebase — check
+        run: |
+          {
+            cat <<'REMOTE'
+          set -uo pipefail
+          cd ~/Nitya_Samagri 2>/dev/null || { echo "  [ FAILED ] Server               folder ~/Nitya_Samagri not found"; exit 1; }
+          ACTIVE=$(cat .active_color 2>/dev/null || echo blue)
+          API="nityasamagri_api_$ACTIVE"
+
+          if [ "$(docker inspect -f '{{.State.Status}}' "$API" 2>/dev/null)" != "running" ]; then
+            echo "  [ FAILED ] API container        $API is not running, so its keys cannot be tested."
+            echo "             Start it first with Manual · Docker (action restart, service api)."
+            exit 1
+          fi
+
+          # Runs inside the live API container, so it uses exactly the keys
+          # the store is using right now.
+          docker exec -i "$API" node - <<'JS'
+          let failed = 0;
+          const row  = (tag, name, text) => console.log(`  ${tag.padEnd(10)} ${name.padEnd(20)} ${text}`);
+          const ok   = (name, text) => row("[ OK ]", name, text);
+          const info = (name, text) => row("[ INFO ]", name, text);
+          const bad  = (name, text) => { row("[ FAILED ]", name, text); failed++; };
+
+          const { FIREBASE_PROJECT_ID: projectId, FIREBASE_CLIENT_EMAIL: clientEmail, FIREBASE_PRIVATE_KEY: privateKey } = process.env;
+
+          async function check() {
+            console.log("\nFIREBASE KEYS (the ones the live API is using)");
+
+            const missing = Object.entries({ FIREBASE_PROJECT_ID: projectId, FIREBASE_CLIENT_EMAIL: clientEmail, FIREBASE_PRIVATE_KEY: privateKey })
+              .filter(([, value]) => !value).map(([name]) => name);
+            if (missing.length) return bad("Keys", `not set in backend/.env: ${missing.join(", ")}`);
+
+            info("Project", projectId);
+            if (!privateKey.includes("BEGIN PRIVATE KEY")) {
+              return bad("Private key", "does not look like a key — it must start with -----BEGIN PRIVATE KEY-----");
+            }
+            if (!clientEmail.endsWith(`@${projectId}.iam.gserviceaccount.com`)) {
+              info("Service account", "its e-mail is from a different project than FIREBASE_PROJECT_ID — check both");
+            }
+
+            // Same set-up as backend/src/config/firebase.ts, under its own
+            // name, then one real, read-only call: it only works with keys
+            // Firebase accepts.
+            const admin = require("firebase-admin");
+            const app = admin.initializeApp({
+              credential: admin.credential.cert({ projectId, clientEmail, privateKey: privateKey.replace(/\\n/g, "\n") }),
+            }, "manual-check");
+
+            const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("no answer from Firebase in 20 seconds")), 20000));
+            await Promise.race([app.auth().listUsers(1), timeout]);
+            ok("Login to Firebase", "keys accepted — OTP login can be verified");
+          }
+
+          check()
+            .catch((e) => bad("Login to Firebase", e.message))
+            .finally(() => process.exit(failed ? 1 : 0));
+          JS
+          REMOTE
+          } | ssh server bash -s 2>&1 | tee report.txt
+
+      - name: Show the report
+        if: always()
+        run: |
+          {
+            echo '### Firebase'
+            echo '```'
+            cat report.txt 2>/dev/null || echo "No report — open the log of the step above."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

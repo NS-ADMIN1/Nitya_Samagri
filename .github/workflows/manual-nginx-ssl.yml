@@ -1,0 +1,190 @@
+name: 🛠️ Manual · Nginx and SSL
+
+# Run by hand only: Actions → "🛠️ Manual · Nginx and SSL" → Run workflow.
+# Use it when a site does not open, shows a certificate warning, or still
+# shows the old version after a deploy.
+#
+#   check   look only — Nginx running, config valid, which colour is live,
+#           days left on the SSL certificates
+#   reload  make Nginx read its config again, no downtime   (needs CONFIRM)
+#
+# A fix always runs the check first. Without CONFIRM typed in the confirm
+# box it stops after the check and changes nothing. Reload is also refused
+# when the config test fails, because a broken config would stop the sites.
+#
+# Secrets used: SERVER_HOST, SERVER_USER, SERVER_SSH_KEY
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        default: check
+        options: [check, reload]
+      confirm:
+        description: "Type CONFIRM to allow reload"
+        default: ""
+
+run-name: "Nginx and SSL · ${{ inputs.action }}"
+
+permissions:
+  contents: read
+
+# One manual tool at a time on the server.
+concurrency:
+  group: manual-server-tools
+  cancel-in-progress: false
+
+env:
+  DOMAINS: "nityasamagri.in adminns.in api.adminns.in"
+
+jobs:
+  nginx:
+    name: 🌐 Nginx and SSL · ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Connect to the server
+        env:
+          SERVER_HOST:    ${{ secrets.SERVER_HOST }}
+          SERVER_USER:    ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -z "$SERVER_HOST" ] || [ -z "$SERVER_USER" ] || [ -z "$SERVER_SSH_KEY" ]; then
+            echo "❌ Add SERVER_HOST, SERVER_USER and SERVER_SSH_KEY to the repository secrets."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/server_key && chmod 600 ~/.ssh/server_key
+          cat > ~/.ssh/config <<EOF
+          Host server
+            HostName $SERVER_HOST
+            User $SERVER_USER
+            IdentityFile ~/.ssh/server_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          ssh server true && echo "✅ Connected to the server."
+
+      - name: Nginx — ${{ inputs.action }}
+        env:
+          ACTION:  ${{ inputs.action }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          {
+            printf 'export ACTION=%q CONFIRM=%q\n' "$ACTION" "$CONFIRM"
+            cat <<'REMOTE'
+          set -uo pipefail
+          failed=0
+          ok()      { printf '  [ OK ]     %-20s %s\n' "$1" "$2"; }
+          bad()     { printf '  [ FAILED ] %-20s %s\n' "$1" "$2"; failed=$((failed + 1)); }
+          info()    { printf '  [ INFO ]   %-20s %s\n' "$1" "$2"; }
+          section() { printf '\n%s\n' "$1"; }
+
+          cd ~/Nitya_Samagri 2>/dev/null || { bad "Server" "folder ~/Nitya_Samagri not found"; exit 1; }
+          ACTIVE=$(cat .active_color 2>/dev/null || echo blue)
+          N="nityasamagri_nginx"
+          config_ok=no
+
+          state() {
+            local s
+            s=$(docker inspect -f '{{.State.Status}}{{if .State.Health}} {{.State.Health.Status}}{{end}}' "$1" 2>/dev/null | head -n 1)
+            echo "${s:-missing}"
+          }
+          # A fix is only allowed with CONFIRM typed in the confirm box.
+          need_confirm() {
+            [ "$CONFIRM" = "CONFIRM" ] && return 0
+            section "NOT DONE"
+            echo "  '$ACTION' changes the live server, so nothing was changed."
+            echo "  To allow it, run again and type CONFIRM in the confirm box."
+            exit 1
+          }
+
+          check() {
+            section "NGINX"
+            case "$(state "$N")" in
+              running|"running healthy") ok "Container" "$(state "$N")" ;;
+              *) bad "Container" "$(state "$N")  (container $N)"; return ;;
+            esac
+
+            if test_out=$(docker exec "$N" nginx -t 2>&1); then
+              ok  "Config test" "valid"
+              config_ok=yes
+            else
+              bad "Config test" "not valid — Nginx would not start with this config:"
+              printf '%s\n' "$test_out" | sed 's/^/      /'
+            fi
+
+            # Each service must point at the live colour, and that container
+            # must be running — otherwise visitors get a "502 Bad Gateway".
+            section "LIVE COLOUR: $ACTIVE"
+            for svc in api web admin; do
+              target=$(grep -oE "${svc}_(blue|green)" "devops/nginx/active/${svc}-backend.conf" 2>/dev/null | head -n 1)
+              if [ "$target" != "${svc}_${ACTIVE}" ]; then
+                bad "$svc" "Nginx points at '${target:-nothing}' but the live colour is $ACTIVE"
+              else
+                case "$(state "nityasamagri_$target")" in
+                  running|"running healthy") ok  "$svc" "points at $target, which is running" ;;
+                  *)                         bad "$svc" "points at $target, which is $(state "nityasamagri_$target")" ;;
+                esac
+              fi
+            done
+          }
+
+          check
+
+          if [ "$ACTION" = "reload" ]; then
+            need_confirm
+            section "RELOAD"
+            if [ "$config_ok" != "yes" ]; then
+              bad "Reload" "not done — fix the config first (see Config test above)"
+            elif docker exec "$N" nginx -s reload > /dev/null 2>&1; then
+              ok  "Reload" "done, Nginx is using the current config"
+            else
+              bad "Reload" "Nginx refused the reload — use Manual · Docker, action 'logs', service 'nginx'"
+            fi
+          fi
+
+          [ "$failed" -eq 0 ]
+          REMOTE
+          } | ssh server bash -s 2>&1 | tee report.txt
+
+      # Checked from outside, the way a visitor's browser sees the certificate.
+      - name: SSL certificates
+        if: always()
+        run: |
+          {
+            printf '\nSSL CERTIFICATES\n'
+            for domain in $DOMAINS; do
+              expiry=$(echo | openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null \
+                         | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2) || true
+              if [ -z "$expiry" ]; then
+                printf '  [ FAILED ] %-20s %s\n' "$domain" "no certificate received — the site may be down"
+                continue
+              fi
+              days=$(( ($(date -d "$expiry" +%s) - $(date +%s)) / 86400 ))
+              if [ "$days" -lt 0 ]; then
+                printf '  [ FAILED ] %-20s %s\n' "$domain" "certificate EXPIRED $(( -days )) day(s) ago"
+              elif [ "$days" -lt 14 ]; then
+                printf '  [ FAILED ] %-20s %s\n' "$domain" "certificate expires in $days day(s) — renew it now"
+              else
+                printf '  [ OK ]     %-20s %s\n' "$domain" "$days day(s) left"
+              fi
+            done
+          } | tee -a report.txt
+          # The pipe above runs in a sub-shell, so read the result from the report.
+          ! grep -q 'FAILED.*certificate' report.txt
+
+      - name: Show the report
+        if: always()
+        run: |
+          {
+            echo '### Nginx and SSL'
+            echo '```'
+            cat report.txt 2>/dev/null || echo "No report — open the log of the step above."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
